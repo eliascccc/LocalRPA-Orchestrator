@@ -51,59 +51,98 @@ system_state = Literal[
     "safestop",
 ]
 
+class Emailhander:
+    pass
 
-class Worker:
-    #Core automation logic with job processing pipeline
+class FileHandler:
+    def __init__(self, logger) -> None:
+        self.in_dev_mode = True
+        self.logger = logger
+        
 
-    def __init__(self, ui):
-        self.ui = ui
+    def read_handover_file(self) -> dict:
 
-        self._safestop_entered = False
+        VALID_JOB_TYPES = ("job1", "job2", "job3", "job4")
+        VALID_SYSTEM_STATES = ("idle", "job_queued", "job_running", "job_verifying", "safestop")
+
+        last_err=None
+
+        for attempt in range(7):
+            try:
+                handover_data = {}
+                with open("handover.txt", "r", encoding="utf-8") as f:
+                    for row in f:
+                        row = row.strip()
+                        if not row: continue
+                        if "=" not in row: raise ValueError(f"Invalid row in handover: {row}")
+                        key, value = row.split("=", 1)
+                        handover_data[key.strip()] = value.strip()
+
+                system_state = handover_data.get("system_state")               # validate state
+                if system_state not in VALID_SYSTEM_STATES:
+                    raise ValueError(f"Unknown state: {system_state}")
+                
+                job_type = handover_data.get("job_type")    #validate job_type
+                if system_state =="job_verifying" and job_type not in VALID_JOB_TYPES:
+                    raise ValueError(f"Unknown job_type for system_state job_verifying: {job_type}")
+
+                return handover_data
+
+            except Exception as err:
+                last_err = err
+                print(f"WARN: retry {attempt+1}/7 : {err}")
+                if not self.in_dev_mode: time.sleep((attempt+1) ** 2) #fail fast in dev
+
+
+        raise RuntimeError(f"handover.txt unreadable: {last_err}")
+    
+      
+    def write_handover_file(self, handover_data: dict) -> None:
+        """ atomic write """
+
+        for attempt in range(7):
+            temp_path = None
+            try:
+                dir_path = os.path.dirname(os.path.abspath("handover.txt"))
+                fd, temp_path = tempfile.mkstemp(dir=dir_path)    # create temp file
+
+                #atomic write
+                with os.fdopen(fd, "w", encoding="utf-8") as tmp:
+                    for key, value in handover_data.items():
+                        if value is None: value = ""
+                        tmp.write(f"{key}={value}\n")
+                    tmp.flush()
+                    os.fsync(tmp.fileno())
+
+                os.replace(temp_path, "handover.txt") # replace original file
+                try: self.logger(f"written: {handover_data}", job_id=handover_data.get("job_id"))
+                except Exception: pass
+                return
+
+            except Exception as err:
+                last_err = err
+                print(f"{attempt+1}st warning from write_handover_file()")
+                try: self.logger(f"WARN: {attempt+1}/7 error", job_id=handover_data.get("job_id"))
+                except Exception: pass
+                if not self.in_dev_mode: time.sleep((attempt + 1) ** 2) # 1 4 9 ... 49sec
+
+            finally: #remove temp-file if writing fails.
+                if temp_path and os.path.exists(temp_path):
+                    try: os.remove(temp_path)
+                    except Exception: pass
+
+        try: self.logger(f"CRITICAL: cannot write handover.txt {last_err}", job_id=handover_data.get("job_id"))
+        except Exception: pass
+        raise RuntimeError("CRITICAL: cannot write handover.txt")
+  
+
+class FriendsAccess:
+    def __init__(self, logger) -> None:
+        self.logger = logger
+
         self.friends_access = {}
         self.friends_file_mtime = None
-        #self.last_network_check = 0
-        self.network_state = None   # None = okänt, True = online, False = no network
-        self.next_network_check_time = 0
-        self.next_job3_check_time = 0
-        self.next_job4_check_time = 0
-        self.recording_process = None
-        self.last_created_job_id = None
-        self.python_is_busy = False #hitta annan lösning?
-
-        self.in_dev_mode = True
-        #self.fake_emails =["alice@example.com", "ex2@whatever.com"]
-        self.fake_emails =[]
-        self.in_dev_mode_use_fake_emails = True
-        self.in_dev_mode_use_fake_emails_once = False #dont change this
-        self.in_dev_mode_disable_recording = True
-
     
-    def startup_sequence(self):
-        if self.in_dev_mode: self.write_handover_file({"system_state":"idle"}) # when deployed RPA will do this before running main.py
-
-
-        VERSION = 0.4
-        self.append_system_log(f"WorkerThread started, version={VERSION}")
-
-        # cleanup
-        for fn in ["stop.flag", "reboot.flag", "reboot_ready.flag"]:
-            try: os.remove(fn)
-            except Exception: pass
-
-        atexit.register(self.stop_recording) #extra protection during normal python exit
-        self.stop_recording() #stop any remaing recordings 
-        self.has_network_access()
-
-        try: self.refresh_friends_access(force_reload=True)
-        except Exception as err: self.enter_safestop(reason=err)
-
-        try:
-            count = self.query_count_jobs_done_today()
-            self.ui.root.after(0, lambda: self.ui.set_jobs_done_today(count))
-        except Exception as err: self.enter_safestop(reason=err)
-
-        #self._init_audit_db()
-
 
     def read_friends_access_file(self, filepath="friends.xlsx") -> dict:
         #code written by AI
@@ -164,105 +203,47 @@ class Worker:
         return access_map
 
 
-    def refresh_ui_status(self) -> None:
-        try:
-            handover_data = self.read_handover_file()
-            system_state = handover_data.get("system_state")
-            print("poll handover.txt from refresh_ui...()")
-        except Exception:
-            system_state = None
+    def refresh_friends_access(self, force_reload=False, filepath="friends.xlsx") -> bool:
+        #code written by AI
+        """
+        Laddar om friends.xlsx om filen ändrats sedan sist.
+        force_reload=True tvingar omladdning.
+        """
+        if not os.path.exists(filepath):
+            raise FileNotFoundError(f"{filepath} not found")
 
-        if self._safestop_entered or system_state == "safestop":
-            ui_status = "safestop"
+        current_mtime = os.path.getmtime(filepath)
 
-        elif self.python_is_busy or system_state in ("job_queued", "job_running", "job_verifying"):
-            ui_status = "working"
+        if (not force_reload) and (self.friends_file_mtime == current_mtime):
+            return False   # ingen ändring
 
-        elif self.network_state is False:
-            ui_status = "no network"
+        new_access = self.read_friends_access_file(filepath)
 
-        elif not self.is_within_working_hours():
-            ui_status = "ooo"
+        self.friends_access = new_access
+        self.friends_file_mtime = current_mtime
 
-        else:
-            ui_status = "online"
-
-        self.ui.root.after(0, lambda: self.ui.set_ui_status(ui_status))
+        return True
 
 
-    def main_loop(self) -> None:
-        self.startup_sequence()
-
-        sleep_s = 1       
-        watchdog_timeout = 600 #10 min
-
-        prev_system_state = None
-        rpa_stalled_since = None
-
-        while True:
-            try:
-                handover_data = self.read_handover_file()
-                system_state = handover_data.get("system_state")
-                
-                #dispatch
-                if system_state == "idle":
-                    self.check_for_jobs()  #set system_state=job_queued if RPA proccessing needed
-                    time.sleep(sleep_s)
-
-                elif system_state == "job_queued":  #RPA-poll trigger
-                    time.sleep(sleep_s)
-
-                elif system_state == "job_running":  #RPA set system_state=job_running when job fetched
-                    time.sleep(sleep_s)
-
-                elif system_state == "job_verifying":       #RPA set system_state=job_verifying when job completed
-                    self.handle_verification_stage(handover_data) 
-
-                elif system_state == "safestop":  #only RPA can trigger 'safestop' this way 
-                    self.reply_and_delete_email(email_id=handover_data.get("email_id"), job_id=handover_data.get("job_id"), message="rpa crash")
-                    self.enter_safestop(reason="RPA safestop", job_id=handover_data.get("job_id"))
-                    
-
-                #log all system_state transitions
-                if system_state != prev_system_state:
-                    self.append_system_log(f"state transition detected by CPU-poll: {prev_system_state} -> {system_state}")
-                    print("state is", system_state)
-
-                    #update DB and set hang_timer
-                    if system_state == "job_queued":
-                        rpa_stalled_since = time.time()  #time.time() is float for 'how many seconds have passed this epoch'
-                    elif system_state == "job_running":
-                        rpa_stalled_since = time.time()
-                        self.append_audit_log(job_id=handover_data.get("job_id"), job_status="RUNNING")
-                    else:
-                        rpa_stalled_since = None
-
-                #detect RPA hang (actually: if no system_state transition from RPA )
-                if rpa_stalled_since and system_state in ("job_queued", "job_running") and time.time() - rpa_stalled_since > watchdog_timeout:
-                    self.reply_and_delete_email(email_id=handover_data.get("email_id"), job_id=handover_data.get("job_id"), message="FAILED. This is a timeout error, very bad error, and you _NEED_ to watch video")
-                    rpa_stalled_since = None
-                    self.enter_safestop(reason="RPA timeout - no progress for 10 min", job_id=handover_data.get("job_id"))
-                    
-                
-                prev_system_state = system_state
-                self.python_is_busy = False
-                self.refresh_ui_status()
-                #print(".", end="", flush=True)
-                 
-            except Exception:
-                err = traceback.format_exc()
-                print("WORKER CRASHED:\n", err)
-                
-                self.enter_safestop(reason=err)             
+    def is_in_friends_access_list(self, email_address: str) -> bool:
+        email_address = email_address.strip().lower()
+        result = email_address in self.friends_access
+        return result
 
 
-    def append_ui_log(self, text:str) -> None:
-        #wrapper
-        self.ui.root.after(0, lambda: self.ui.append_log_line(text))
+    def has_job_access(self, email_address: str, job_type: str) -> bool:
+        email_address = email_address.strip().lower()
+        job_type = job_type.strip().lower()
+        result = job_type in self.friends_access.get(email_address, set())
+        return result
 
+
+class Auditlogger:
+    def __init__(self, logger) -> None:
+        self.logger = logger
 
     def append_audit_log(self, job_id, email_address=None, email_subject=None, job_type=None, job_start_date=None, job_start_time=None, job_finish_time=None, job_status=None, error_code=None,error_explanation=None, insert_db_row=False) -> None:
-        # example use: self.append_audit_log(job_id=20260311124501, job_type="job1")
+        # example use: self.audit_repo.append_audit_log(job_id=20260311124501, job_type="job1")
 
         if job_status not in ("RECEIVED", "REJECTED", "QUEUED", "RUNNING", "VERIFYING", "DONE", "FAILED", None):
             raise ValueError(f"append_audit_log(): unknown job_status={job_status}")
@@ -281,7 +262,7 @@ class Worker:
         }
 
         fields = {k: v for k, v in all_fields.items() if v is not None}
-        self.append_system_log(f"appending: {fields}", job_id=job_id)
+        self.logger(f"appending: {fields}", job_id=job_id)
 
         with sqlite3.connect("log.db") as conn:
             cur = conn.cursor()
@@ -317,7 +298,202 @@ class Worker:
                     raise ValueError(f"append_audit_log(): no row in DB with job_id={job_id}")
     
 
-    def append_system_log(self, event_text: str, job_id=None):
+
+
+    def query_count_jobs_done_today(self) -> int:
+        if not os.path.isfile("log.db"):
+            return 0
+
+        today = datetime.date.today().isoformat()
+
+        with sqlite3.connect("log.db") as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT COUNT(*)
+                FROM audit_log
+                WHERE job_start_date = ?
+                AND job_status = 'DONE'
+            """, (today,))
+            
+            result = cur.fetchone()[0]
+            return result
+
+
+    def count_jobs_done_today_by_user(self, job_id, email_address) -> int:    
+        #query for previuos jobs today from sender
+        #self.logger("running")
+
+        today = datetime.datetime.now().strftime("%Y-%m-%d")
+        conn = sqlite3.connect("log.db")
+        cur = conn.cursor()
+
+        cur.execute(
+            """
+            SELECT COUNT(*)
+            FROM audit_log
+            WHERE job_id != ? AND job_start_date = ? AND email_address = ?
+            """,
+            (job_id, today, email_address,)
+        )
+
+        jobs_today = cur.fetchone()[0]
+        conn.close()
+
+        return jobs_today
+
+
+class Worker:
+    #Core automation logic with job processing pipeline
+
+    def __init__(self, ui):
+        self.ui = ui
+        self.filehandler = FileHandler(logger=self.logger)  #nu äger worker en Filehandler (som får med append-metod)
+        self.friends_repo = FriendsAccess(logger=self.logger)
+        self.audit_repo = Auditlogger(logger=self.logger)
+
+        self._safestop_entered = False
+
+        #self.last_network_check = 0
+        self.network_state = None   # None = okänt, True = online, False = no network
+        self.next_network_check_time = 0
+        self.next_job3_check_time = 0
+        self.next_job4_check_time = 0
+        self.recording_process = None
+        self.last_created_job_id = None
+        self.python_is_busy = False #hitta annan lösning?
+
+        self.in_dev_mode = True
+        self.fake_emails =["alice@example.com", "dummy,", "bob@test.com"]
+        #self.fake_emails =[]
+        self.in_dev_mode_use_fake_emails = True
+        self.in_dev_mode_use_fake_emails_once = False #dont change this
+        self.in_dev_mode_disable_recording = True
+        self.in_dev_mode_use_fake_scheduledjobs = False
+
+    
+    def startup_sequence(self):
+        if self.in_dev_mode: self.filehandler.write_handover_file({"system_state":"idle"}) # when deployed RPA will do this before running main.py
+
+
+        VERSION = 0.4
+        self.logger(f"WorkerThread started, version={VERSION}")
+
+        # cleanup
+        for fn in ["stop.flag", "reboot.flag", "reboot_ready.flag"]:
+            try: os.remove(fn)
+            except Exception: pass
+
+        atexit.register(self.stop_recording) #extra protection during normal python exit
+        self.stop_recording() #stop any remaing recordings 
+        self.has_network_access()
+
+        try: self.friends_repo.refresh_friends_access(force_reload=True)
+        except Exception as err: self.enter_safestop(reason=err)
+
+        try:
+            count = self.audit_repo.query_count_jobs_done_today()
+            self.ui.root.after(0, lambda: self.ui.set_jobs_done_today(count))
+        except Exception as err: self.enter_safestop(reason=err)
+
+        #self._init_audit_db()
+
+
+    def refresh_ui_status(self) -> None:
+        try:
+            handover_data = self.filehandler.read_handover_file()
+            system_state = handover_data.get("system_state")
+            print("poll handover.txt from refresh_ui...()")
+        except Exception:
+            system_state = None
+
+        if self._safestop_entered or system_state == "safestop":
+            ui_status = "safestop"
+
+        elif self.python_is_busy or system_state in ("job_queued", "job_running", "job_verifying"):
+            ui_status = "working"
+
+        elif self.network_state is False:
+            ui_status = "no network"
+
+        elif not self.is_within_working_hours():
+            ui_status = "ooo"
+
+        else:
+            ui_status = "online"
+
+        self.ui.root.after(0, lambda: self.ui.set_ui_status(ui_status))
+
+
+    def main_loop(self) -> None:
+        self.startup_sequence()
+
+        sleep_s = 1       
+        watchdog_timeout = 600 #10 min
+
+        prev_system_state = None
+        rpa_stalled_since = None
+
+        while True:
+            try:
+                handover_data = self.filehandler.read_handover_file()
+                system_state = handover_data.get("system_state")
+                
+                #dispatch
+                if system_state == "idle":
+                    self.check_for_jobs()  #set system_state=job_queued if RPA proccessing needed
+                    time.sleep(sleep_s)
+
+                elif system_state == "job_queued":  #RPA-poll trigger
+                    time.sleep(sleep_s)
+
+                elif system_state == "job_running":  #RPA set system_state=job_running when job fetched
+                    time.sleep(sleep_s)
+
+                elif system_state == "job_verifying":       #RPA set system_state=job_verifying when job completed
+                    self.handle_verification_stage(handover_data) 
+
+                elif system_state == "safestop":  #only RPA can trigger 'safestop' this way 
+                    self.reply_and_delete_email(email_id=handover_data.get("email_id"), job_id=handover_data.get("job_id"), message="rpa crash")
+                    self.enter_safestop(reason="RPA safestop", job_id=handover_data.get("job_id"))
+                    
+
+                #log all system_state transitions
+                if system_state != prev_system_state:
+                    self.logger(f"state transition detected by CPU-poll: {prev_system_state} -> {system_state}")
+                    print("state is", system_state)
+
+                    #update DB and set hang_timer
+                    if system_state == "job_queued":
+                        rpa_stalled_since = time.time()  #time.time() is float for 'how many seconds have passed this epoch'
+                    elif system_state == "job_running":
+                        rpa_stalled_since = time.time()
+                        self.audit_repo.append_audit_log(job_id=handover_data.get("job_id"), job_status="RUNNING")
+                    else:
+                        rpa_stalled_since = None
+
+                #detect RPA hang (actually: if no system_state transition from RPA )
+                if rpa_stalled_since and system_state in ("job_queued", "job_running") and time.time() - rpa_stalled_since > watchdog_timeout:
+                    self.reply_and_delete_email(email_id=handover_data.get("email_id"), job_id=handover_data.get("job_id"), message="FAILED. This is a timeout error, very bad error, and you _NEED_ to watch video")
+                    rpa_stalled_since = None
+                    self.enter_safestop(reason="RPA timeout - no progress for 10 min", job_id=handover_data.get("job_id"))
+                    
+                
+                prev_system_state = system_state
+                self.python_is_busy = False
+                self.refresh_ui_status()
+                #print(".", end="", flush=True)
+                 
+            except Exception:
+                reason = traceback.format_exc()                
+                self.enter_safestop(reason=reason)             
+
+
+    def append_ui_log(self, text:str) -> None:
+        #wrapper
+        self.ui.root.after(0, lambda: self.ui.append_log_line(text))
+
+
+    def logger(self, event_text: str, job_id=None):
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S") #+ "."+str(datetime.datetime.now().microsecond)[:-4]
         try: caller_name = sys._getframe(1).f_code.co_name
         except Exception: caller_name ="caller_name error"
@@ -340,94 +516,22 @@ class Worker:
 
             except Exception as err:
                 last_err = err
-                print(f"WARN: retry {i+1}/7 from append_system_log():", err)
+                print(f"WARN: retry {i+1}/7 from logger():", err)
                 if not self.in_dev_mode: time.sleep(i+1) #fail fast in dev
 
-        raise RuntimeError(f"append_system_log() failed after 7 attempts: {last_err}")
+        raise RuntimeError(f"logger() failed after 7 attempts: {last_err}")
 
-           
-    def read_handover_file(self) -> dict:
-
-        VALID_JOB_TYPES = ("job1", "job2", "job3", "job4")
-        VALID_SYSTEM_STATES = ("idle", "job_queued", "job_running", "job_verifying", "safestop")
-
-        for attempt in range(7):
-            try:
-                handover_data = {}
-                with open("handover.txt", "r", encoding="utf-8") as f:
-                    for row in f:
-                        row = row.strip()
-                        if not row: continue
-                        if "=" not in row: raise ValueError(f"Invalid row in handover: {row}")
-                        key, value = row.split("=", 1)
-                        handover_data[key.strip()] = value.strip()
-
-                system_state = handover_data.get("system_state")               # validate state
-                if system_state not in VALID_SYSTEM_STATES:
-                    raise ValueError(f"Unknown state: {system_state}")
-                
-                job_type = handover_data.get("job_type")    #validate job_type
-                if system_state =="job_verifying" and job_type not in VALID_JOB_TYPES:
-                    raise ValueError(f"Unknown job_type for system_state job_verifying: {job_type}")
-
-                return handover_data
-
-            except Exception as err:
-                last_err = err
-                print(f"WARN: retry {attempt+1}/7 : {err}")
-                if not self.in_dev_mode: time.sleep((attempt+1) ** 2) #fail fast in dev
-
-        try: self.append_system_log(f"handover.txt unreadable: {last_err}")
-        except Exception: pass
-        raise RuntimeError("handover.txt unreadable")
-
-
-    def write_handover_file(self, handover_data: dict) -> None:
-        """ atomic write """
-
-        for attempt in range(7):
-            temp_path = None
-            try:
-                dir_path = os.path.dirname(os.path.abspath("handover.txt"))
-                fd, temp_path = tempfile.mkstemp(dir=dir_path)    # create temp file
-
-                #atomic write
-                with os.fdopen(fd, "w", encoding="utf-8") as tmp:
-                    for key, value in handover_data.items():
-                        if value is None: value = ""
-                        tmp.write(f"{key}={value}\n")
-                    tmp.flush()
-                    os.fsync(tmp.fileno())
-
-                os.replace(temp_path, "handover.txt") # replace original file
-                try: self.append_system_log(f"written: {handover_data}", job_id=handover_data.get("job_id"))
-                except Exception: pass
-                return
-
-            except Exception as err:
-                last_err = err
-                print(f"{attempt+1}st warning from write_handover_file()")
-                try: self.append_system_log(f"WARN: {attempt+1}/7 error", job_id=handover_data.get("job_id"))
-                except Exception: pass
-                if not self.in_dev_mode: time.sleep((attempt + 1) ** 2) # 1 4 9 ... 49sec
-
-            finally: #remove temp-file if writing fails.
-                if temp_path and os.path.exists(temp_path):
-                    try: os.remove(temp_path)
-                    except Exception: pass
-
-        try: self.append_system_log(f"CRITICAL: cannot write handover.txt {last_err}", job_id=handover_data.get("job_id"))
-        except Exception: pass
-        raise RuntimeError("CRITICAL: cannot write handover.txt")
-      
-
+ 
     def enter_safestop(self, reason, job_id=None) -> Never | None:
         #critical errors and crashes end up here
+
+        print("WORKER CRASHED:\n", reason)
+
         
         if self._safestop_entered: return #re-entrancy protection
         self._safestop_entered = True 
 
-        try: self.append_system_log(f"CRASH: {reason}", job_id)
+        try: self.logger(f"CRASH: {reason}", job_id)
         except Exception: pass
 
         try: self.notify_admin_by_email(reason)
@@ -455,7 +559,7 @@ class Worker:
 
     def wait_for_reboot_after_safestop(self, job_id) -> Never:
         #experimental
-        try: self.append_system_log("running", job_id)
+        try: self.logger("running", job_id)
         except Exception: pass
 
         while True:
@@ -475,7 +579,8 @@ class Worker:
 
     def check_for_jobs(self) -> None:
         
-        self.refresh_friends_access()
+        if self.friends_repo.refresh_friends_access(): self.logger(f"friends.xlsx reloaded")
+
         
         #return stops further checks
         did_RPA_handover = self.handle_emails()
@@ -494,9 +599,11 @@ class Worker:
         received_notice_sent = False
         final_reply_sent = False
 
-        for email_obj in self.fetch_new_emails():
+        emails = self.fetch_new_emails()
+        for email_obj in emails:
+            emails.remove(email_obj)
 
-            if self.in_dev_mode and self.in_dev_mode_use_fake_emails_once: continue # remove in PROD
+            if self.in_dev_mode_use_fake_emails_once: continue # remove in PROD
 
             email_address = email_obj # email_obj.sender
             email_subject = email_obj+"_subjekt" #email_obj.subject
@@ -506,11 +613,11 @@ class Worker:
             #sender, subj, body, email_id = _extract_email_fields()
 
             self.append_ui_log(f"email from {email_address}")
-            self.append_system_log(f"new email from {email_address}")
+            self.logger(f"new email from {email_address}")
 
-            if not self.is_in_friends_access_list(email_address):
+            if not self.friends_repo.is_in_friends_access_list(email_address):
                 self.delete_email(email_id)             #no reply
-                self.append_system_log(f"email from {email_address} deleted (not in friends.xlsx)")
+                self.logger(f"email from {email_address} deleted (not in friends.xlsx)")
                 self.append_ui_log("--> deleted (not in friends.xlsx)\n") 
                 continue 
 
@@ -524,13 +631,13 @@ class Worker:
 
             try:
                 job_id = self.create_job_id()
-                self.append_audit_log(job_id=job_id, job_status="RECEIVED", email_address=email_address, email_subject=email_subject, job_start_date=datetime.datetime.now().strftime("%Y-%m-%d"), job_start_time=datetime.datetime.now().strftime("%H:%M:%S"), insert_db_row=True)
+                self.audit_repo.append_audit_log(job_id=job_id, job_status="RECEIVED", email_address=email_address, email_subject=email_subject, job_start_date=datetime.datetime.now().strftime("%Y-%m-%d"), job_start_time=datetime.datetime.now().strftime("%H:%M:%S"), insert_db_row=True)
    
                 if not self.is_within_working_hours():
                     self.reply_and_delete_email(email_id, job_id, message="Fail! email received outside working hours 07-20. Your email was deleted")
                     sender_notified = True
                     self.append_ui_log("--> delete & reply 'outside working hours'\n")
-                    self.append_audit_log(job_id=job_id, job_status="REJECTED", error_code="OUTSIDE_WORKING_HOURS", error_explanation="email received outside working hours 07-20")
+                    self.audit_repo.append_audit_log(job_id=job_id, job_status="REJECTED", error_code="OUTSIDE_WORKING_HOURS", error_explanation="email received outside working hours 07-20")
                     continue
             
                 job_type = self.identify_email_job_type(email_id, job_id=job_id)
@@ -539,21 +646,21 @@ class Worker:
                     self.reply_and_delete_email(email_id, job_id, "Fail! Could not identify a job type from this email. Check spelling of keywords and/or attached files and send again.")
                     sender_notified = True
                     self.append_ui_log(f"--> delete & reply 'could not identify job type' \n")
-                    self.append_audit_log(job_id=job_id, job_status="REJECTED", error_code="UNKNOWN_JOB", error_explanation=f"Unable to identify job type")
+                    self.audit_repo.append_audit_log(job_id=job_id, job_status="REJECTED", error_code="UNKNOWN_JOB", error_explanation=f"Unable to identify job type")
                     continue
                 
-                if not self.has_job_access(email_address=email_address, job_type=job_type):
+                if not self.friends_repo.has_job_access(email_address=email_address, job_type=job_type):
                     self.reply_and_delete_email(email_id, job_id, f"FAIL! No access to {job_type}. Check with administrator for access.")
                     sender_notified = True
                     self.append_ui_log(f"--> delete & reply 'no access to {job_type} \n")
-                    self.append_audit_log(job_id=job_id, job_status="REJECTED", error_code="NO_ACCESS", error_explanation=f"Sender has no access to {job_type}")
+                    self.audit_repo.append_audit_log(job_id=job_id, job_status="REJECTED", error_code="NO_ACCESS", error_explanation=f"Sender has no access to {job_type}")
                     continue
                 
                 if not self.has_network_access():
                     self.reply_and_delete_email(email_id, job_id, f"FAIL! No network. Try again later.")
                     sender_notified = True
                     self.append_ui_log(f"--> delete & reply 'no network' \n")
-                    self.append_audit_log(job_id=job_id, job_status="REJECTED", error_code="NO_NETWORK", error_explanation=f"No network at the moment")
+                    self.audit_repo.append_audit_log(job_id=job_id, job_status="REJECTED", error_code="NO_NETWORK", error_explanation=f"No network at the moment")
                     continue
 
 
@@ -564,7 +671,7 @@ class Worker:
                     self.reply_and_delete_email(email_id, job_id, "PONG (robot online).")              
                     sender_notified = True
                     self.append_ui_log(f"--> delete & reply 'PONG' \n")
-                    self.append_audit_log(job_id=job_id, job_status="DONE", job_finish_time=datetime.datetime.now().strftime("%H:%M:%S"))
+                    self.audit_repo.append_audit_log(job_id=job_id, job_status="DONE", job_finish_time=datetime.datetime.now().strftime("%H:%M:%S"))
                     continue 
                 
                 
@@ -577,7 +684,7 @@ class Worker:
                         self.reply_and_delete_email(email_id, job_id, error)
                         sender_notified = True
                         self.append_ui_log(f"--> delete & reply 're-check input for {job_type}' \n")
-                        self.append_audit_log(job_id=job_id, job_status="REJECTED", error_code="UNSPECIFIED", error_explanation=error)
+                        self.audit_repo.append_audit_log(job_id=job_id, job_status="REJECTED", error_code="UNSPECIFIED", error_explanation=error)
                         del is_valid, error
                         continue
                 
@@ -588,7 +695,7 @@ class Worker:
                         self.reply_and_delete_email(email_id, job_id, error)
                         sender_notified = True                 
                         self.append_ui_log(f"--> delete & reply 're-check input for {job_type}' \n")
-                        self.append_audit_log(job_id=job_id, job_status="REJECTED", error_code="UNSPECIFIED", error_explanation=error)
+                        self.audit_repo.append_audit_log(job_id=job_id, job_status="REJECTED", error_code="UNSPECIFIED", error_explanation=error)
                         del error, is_valid
                         continue
 
@@ -604,23 +711,23 @@ class Worker:
                 try: self.recording_process = self.start_recording(job_id)
                 except Exception: raise RuntimeError("unable to start videorecording")
                 
-                self.append_audit_log(job_id=job_id, job_status="QUEUED")
+                self.audit_repo.append_audit_log(job_id=job_id, job_status="QUEUED")
                 handover_data = {"system_state": "job_queued", "job_id": job_id, "job_type": job_type, "email_id": email_id, "created_at": time.time(),**payload}
 
                 try:
-                    self.write_handover_file(handover_data)
+                    self.filehandler.write_handover_file(handover_data)
                 except Exception as err:
                     self.reply_and_delete_email(email_id, job_id, "FAIL! System error, your request is valid but could not start. Robot will stop (out-of-service) and your email was deleted. An automated email was sent to robot admin.")
                     sender_notified = True
                     self.append_ui_log(f"--> delete & reply 'system error' \n")
-                    self.append_audit_log(job_id=job_id, job_status="FAILED", error_code="SYSTEM_ERROR", error_explanation=err)
+                    self.audit_repo.append_audit_log(job_id=job_id, job_status="FAILED", error_code="SYSTEM_ERROR", error_explanation=err)
                     self.enter_safestop(reason=err, job_id=job_id)
                     
                 del handover_data, payload, payload_or_error
                 
                 if not sender_notified: raise ValueError("!!!!!!!!!!!!!!!!!!!!!!!!! add code to notify user")
                 
-                self.append_system_log(f"return True (RPA handover needed)", job_id)
+                self.logger(f"return True (RPA handover needed)", job_id)
                 return True
             
             except Exception as err:
@@ -629,7 +736,7 @@ class Worker:
                         self.reply_and_delete_email(email_id, job_id, "Unknown system error, the robot will do a full stop (out-of-service) and your email was deleted.")
                         sender_notified = True
                         self.append_ui_log(f"--> delete & reply 'unknown system error' \n")
-                        self.append_audit_log(job_id=job_id, job_status="FAILED", error_code="SYSTEM_ERROR", error_explanation=err)
+                        self.audit_repo.append_audit_log(job_id=job_id, job_status="FAILED", error_code="SYSTEM_ERROR", error_explanation=err)
                 except Exception: pass
 
                 raise #notify sender when error and re-raise error
@@ -637,45 +744,15 @@ class Worker:
         
         
         if self.in_dev_mode: self.in_dev_mode_use_fake_emails_once = True #remove in prod
-        #self.append_system_log(f"return False (no unhandled emails in inbox)")
+        #self.logger(f"return False (no unhandled emails in inbox)")
         return False
 
 
     def fetch_new_emails(self):
-        if self.in_dev_mode_use_fake_emails:
+        if self.in_dev_mode:
             return self.fake_emails
         else:
             return []
-
-
-    def refresh_friends_access(self, force_reload=False, filepath="friends.xlsx") -> bool:
-        #code written by AI
-        """
-        Laddar om friends.xlsx om filen ändrats sedan sist.
-        force_reload=True tvingar omladdning.
-        """
-        if not os.path.exists(filepath):
-            raise FileNotFoundError(f"{filepath} not found")
-
-        current_mtime = os.path.getmtime(filepath)
-
-        if (not force_reload) and (self.friends_file_mtime == current_mtime):
-            return False   # ingen ändring
-
-        new_access = self.read_friends_access_file(filepath)
-
-        self.friends_access = new_access
-        self.friends_file_mtime = current_mtime
-
-        self.append_system_log(f"friends.xlsx loaded/reloaded, users={len(self.friends_access)}")
-        return True
-
-
-    def is_in_friends_access_list(self, email_address: str) -> bool:
-        email_address = email_address.strip().lower()
-        result = email_address in self.friends_access
-        return result
-
 
     def create_job_id(self) -> int:
         job_id = int(datetime.datetime.now().strftime("%Y%m%d%H%M%S"))
@@ -697,7 +774,7 @@ class Worker:
     def has_network_access(self) -> bool:
         #this runs at highest every hour, or before new jobs
         #self.network_state:    None = okänt, True = online, False = no network
-        #self.append_system_log("running")
+        #self.logger("running")
         
         NETWORK_TEST_PATH = r"/"
         now = time.time()
@@ -720,9 +797,9 @@ class Worker:
             self.network_state = online
 
             if online:
-                self.append_system_log("network restored")
+                self.logger("network restored")
             else:
-                self.append_system_log(f"WARN: network lost")
+                self.logger(f"WARN: network lost")
 
         # olika pollingintervall beroende på status
         if online:
@@ -735,37 +812,15 @@ class Worker:
         return online
 
 
-    def has_job_access(self, email_address: str, job_type: str) -> bool:
-        email_address = email_address.strip().lower()
-        job_type = job_type.strip().lower()
-        result = job_type in self.friends_access.get(email_address, set())
-        return result
-    
-
     def move_email_to_processing_folder(self,email):
         #move from inbox to "processing"
         pass
 
 
     def send_lifesign_notice_if_first_today(self, job_id, email_address) -> None:
-        #query for previuos jobs today from sender
-        self.append_system_log("running")
+        
 
-        today = datetime.datetime.now().strftime("%Y-%m-%d")
-        conn = sqlite3.connect("log.db")
-        cur = conn.cursor()
-
-        cur.execute(
-            """
-            SELECT COUNT(*)
-            FROM audit_log
-            WHERE job_id != ? AND job_start_date = ? AND email_address = ?
-            """,
-            (job_id, today, email_address,)
-        )
-
-        jobs_today = cur.fetchone()[0]
-        conn.close()
+        jobs_today = self.audit_repo.count_jobs_done_today_by_user(job_id, email_address)
 
         if jobs_today != 0:
             return
@@ -791,7 +846,7 @@ class Worker:
 
         #update also sqlite?
 
-        self.append_system_log(f"arg: message='{message[:50]+'...' if len(message)>50 else message}'", job_id)
+        self.logger(f"arg: message='{message[:50]+'...' if len(message)>50 else message}'", job_id)
         
             # some "remove email" -action
 
@@ -802,7 +857,7 @@ class Worker:
         job_type = "unknown"
         job_type = "job1"
         
-        self.append_system_log(f"job_type is {job_type}", job_id)
+        self.logger(f"job_type is {job_type}", job_id)
 
         return(job_type)
 
@@ -819,7 +874,7 @@ class Worker:
 
     def start_recording(self, job_id) -> subprocess.Popen | None:
         #written by AI
-        self.append_system_log("running", job_id)
+        self.logger("running", job_id)
 
         if self.in_dev_mode_disable_recording:
             recording_process = None #remove in prod
@@ -866,7 +921,7 @@ class Worker:
     def stop_recording(self, job_id=None) -> None:
         #written by AI
         try:
-            self.append_system_log(" ", job_id)
+            self.logger(" ", job_id)
         except Exception: pass
 
         recording_process = self.recording_process
@@ -932,16 +987,16 @@ class Worker:
                 pass
 
 
-    def upload_with_retry(local_file="jobid.mkv", remote_path, max_attempts=3):
+    def upload_with_retry(self,local_file="jobid.mkv", remote_path="dummy", max_attempts=3):
         import shutil
         
         for attempt in range(max_attempts):
             try:
                 # Create parent dir
-                remote_path.parent.mkdir(parents=True, exist_ok=True)
+                #remote_path.parent.mkdir(parents=True, exist_ok=True)
                 
                 # Copy file
-                shutil.copy2(local_file, remote_path)
+               # shutil.copy2(local_file, remote_path)
                 
                 print(f"✓ Upload successful: {remote_path}")
                 return True
@@ -955,8 +1010,8 @@ class Worker:
         return False
 
 
-
     def handle_scheduled_jobs(self) -> bool:
+
         
         if not self.has_network_access():
             return False
@@ -978,14 +1033,23 @@ class Worker:
             self.next_job4_check_time = now + 3600 #1h
             if self.in_dev_mode: self.next_job4_check_time = now + 10
 
-        #self.append_system_log(f"return False (no scheduled jobs found)")
+        #self.logger(f"return False (no scheduled jobs found)")
         return False #no handover needed
     
-        
-    def handle_scheduled_job_job3(self) -> bool:
-        self.append_system_log(f"check")
 
-        if random.randint(0, 1) != 1: #simulate found
+    def unused_simulate_a_new_job3(self):
+        with open("job3.flag", "w", encoding="utf-8") as f:
+            f.write("simuation of workflow: job1")
+
+
+
+    def handle_scheduled_job_job3(self) -> bool:
+        self.logger(f"check")
+        
+        if self.in_dev_mode_use_fake_scheduledjobs == False:
+            return False
+        
+        if random.randint(0, 1) == 1: #simulation
             return False #no jobs found
 
         
@@ -995,19 +1059,19 @@ class Worker:
         
         job_id = self.create_job_id()
         job_type="job3"
-        self.append_system_log("new job found, job_id created", job_id)
+        self.logger("new job found, job_id created", job_id)
         self.append_ui_log("job found!")
-        self.append_audit_log(job_id=job_id, job_status="QUEUED", job_type=job_type, job_start_date=datetime.datetime.now().strftime("%Y-%m-%d"), job_start_time=datetime.datetime.now().strftime("%H:%M:%S"), insert_db_row=True)
+        self.audit_repo.append_audit_log(job_id=job_id, job_status="QUEUED", job_type=job_type, job_start_date=datetime.datetime.now().strftime("%Y-%m-%d"), job_start_time=datetime.datetime.now().strftime("%H:%M:%S"), insert_db_row=True)
 
 
         handover_data = {"system_state": "job_queued", "job_id":job_id, "job_type": job_type}
-        self.write_handover_file(handover_data)
+        self.filehandler.write_handover_file(handover_data)
         return True
         
 
     def handle_scheduled_job_job4(self) -> bool:
         #placeholder for job4 logic
-        self.append_system_log("check job4")
+        self.logger("check job4")
         return False
 
 
@@ -1016,8 +1080,8 @@ class Worker:
         job_id = handover_data.get("job_id")
         job_type = handover_data.get("job_type")
 
-        self.append_system_log(f"fetched: {handover_data}", job_id)
-        self.append_audit_log(job_id=job_id, job_finish_time=datetime.datetime.now().strftime("%H:%M:%S"), job_status="VERIFYING") 
+        self.logger(f"fetched: {handover_data}", job_id)
+        self.audit_repo.append_audit_log(job_id=job_id, job_finish_time=datetime.datetime.now().strftime("%H:%M:%S"), job_status="VERIFYING") 
 
 
 
@@ -1037,8 +1101,8 @@ class Worker:
 
 
         time.sleep(3) #simulate job_verifying
-        self.append_audit_log(job_id=job_id, job_finish_time=datetime.datetime.now().strftime("%H:%M:%S"), job_status="DONE") 
-        self.append_system_log("success", job_id)
+        self.audit_repo.append_audit_log(job_id=job_id, job_finish_time=datetime.datetime.now().strftime("%H:%M:%S"), job_status="DONE") 
+        self.logger("success", job_id)
         self.reset_after_verification(job_id)
 
 
@@ -1052,32 +1116,13 @@ class Worker:
     def reset_after_verification(self, job_id) -> None:
         self.stop_recording(job_id)
 
-        count = self.query_count_jobs_done_today()
+        count = self.audit_repo.query_count_jobs_done_today()
         self.ui.root.after(0, lambda: self.ui.set_jobs_done_today(count))
 
-        self.write_handover_file({"system_state": "idle"})
-        self.append_system_log("state: job_verifying -> idle", job_id)
+        self.filehandler.write_handover_file({"system_state": "idle"})
+        self.logger("state: job_verifying -> idle", job_id)
         time.sleep(0.1) # to allow set_ui_status: online
-
-
-    def query_count_jobs_done_today(self) -> int:
-        if not os.path.isfile("log.db"):
-            return 0
-
-        today = datetime.date.today().isoformat()
-
-        with sqlite3.connect("log.db") as conn:
-            cur = conn.cursor()
-            cur.execute("""
-                SELECT COUNT(*)
-                FROM audit_log
-                WHERE job_start_date = ?
-                AND job_status = 'DONE'
-            """, (today,))
-            
-            result = cur.fetchone()[0]
-            return result
-        
+       
       
 class StopFlagWatcher:
     #CPU-polls for stop.flag (which is created by RPA on operator stop) and kills py if found
@@ -1151,6 +1196,34 @@ class Sqlite: #keep or remove?
             GROUP BY job_status
         """)
         return cur.fetchall()
+
+# Display in UI
+def get_dashboard_stats(self):
+    """Stats for dashboard display"""
+    db = sqlite3.connect("log.db")
+    db.row_factory = sqlite3.Row
+    
+    today = datetime.datetime.now().strftime("%Y-%m-%d")
+    
+    # Today's summary
+    cur = db.cursor()
+    cur.execute("""
+        SELECT 
+            SUM(CASE WHEN job_status='DONE' THEN 1 ELSE 0 END) as done,
+            SUM(CASE WHEN job_status='FAILED' THEN 1 ELSE 0 END) as failed,
+            SUM(CASE WHEN job_status='REJECTED' THEN 1 ELSE 0 END) as rejected,
+            SUM(CASE WHEN job_status='RPA_RUNNING' THEN 1 ELSE 0 END) as running
+        FROM audit_log
+        WHERE job_start_date = ?
+    """, (today,))
+    
+    row = cur.fetchone()
+    return {
+        "completed": row['done'] or 0,
+        "failed": row['failed'] or 0,
+        "rejected": row['rejected'] or 0,
+        "in_progress": row['running'] or 0,
+    }
 
 
 class Graphics:
@@ -1483,7 +1556,7 @@ class RPA_simulator:
 
 
   
-    def append_system_log(self, text: str, job_id=None):
+    def logger(self, text: str, job_id=None):
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S") #+ str(datetime.datetime.now().microsecond)[:-4]
    
         job_part = f" | JOB {job_id}" if job_id else ""
@@ -1497,13 +1570,13 @@ class RPA_simulator:
                 return 
 
             except Exception as e:
-                print(f"{i}st warning from append_system_log():", e)
+                print(f"{i}st warning from logger():", e)
     
 
     #läs handover.txt och kolla ifall "queued"
     def run(self):
         print("RPA_simulator() I'm alive")
-        self.append_system_log("RPA I'm alive")
+        self.logger("RPA I'm alive")
 
         #do a time-check to not start old jobs? 
 
@@ -1532,8 +1605,8 @@ class RPA_simulator:
             #om "queued ändra till "job_running" och sov 2 sek
             else:
                 handover_data = { "system_state": "job_running",  "job_id": job_id }
-                self.append_system_log(f"system_state: job_queued -> job_running", job_id)
-                self.append_system_log(f"recieved:{handover_data}",job_id)
+                self.logger(f"system_state: job_queued -> job_running", job_id)
+                self.logger(f"recieved:{handover_data}",job_id)
 
                 print("RPA_simulator() jobb påbörjas. system_state: job_queued -> job_running")
                 
@@ -1552,9 +1625,9 @@ class RPA_simulator:
 
                 processtid= random.randint(2,4)
                 time.sleep(processtid)
-                self.append_system_log(f"screen_1 completed", job_id)
+                self.logger(f"screen_1 completed", job_id)
                 time.sleep(3)
-                self.append_system_log(f"screen_2 completed", job_id)
+                self.logger(f"screen_2 completed", job_id)
 
                 #ändra sen till "job_verifying"
                 handover_data = { "system_state": "job_verifying",  "job_id": job_id , "job_type": job_type}
@@ -1572,7 +1645,7 @@ class RPA_simulator:
                     os.fsync(tmp.fileno())
                 os.replace(temp_path, "handover.txt")
                 print("async RPA_simulator(): handover, system_state: job_running -> job_verifying")
-                self.append_system_log(f"done, system_state: job_running -> job_verifying", job_id)
+                self.logger(f"done, system_state: job_running -> job_verifying", job_id)
 
 #start ui
 g = Graphics()
