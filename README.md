@@ -13,7 +13,7 @@ It runs locally on a standard operator machine and acts as the **control layer**
 * incoming job triggers (email, shared inbox, data queries)
 * and external RPA tools (UiPath, Power Automate, Blue Prism, etc.)
 
-This project is intentionally designed for small, local deployments without infrastructure or licensing overhead.
+This project is designed for small, local deployments without requiring servers, cloud infrastructure, or additional backend licensing beyond your RPA tool.
 
 ---
 
@@ -35,7 +35,7 @@ This project separates **orchestration** from **UI automation**:
   * keyboard input
   * ERP/UI interaction
 
-They communicate through a simple file-based IPC mechanism (`handover.txt`).
+They communicate through a file-based IPC mechanism (`handover.txt`).
 
 ---
 
@@ -111,8 +111,6 @@ The system uses a file-based "handover" mechanism to transfer control between th
 The handover file represents both:
 - the current system state
 - and the payload required for the next execution step
-
-This makes the orchestration explicit, inspectable, and robust.
 
 ---
 
