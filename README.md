@@ -8,7 +8,7 @@ A lightweight local orchestrator for email- and data-driven automation, delegati
 
 This project is a lightweight local RPA orchestrator written in Python.
 
-It is designed as a small-scale alternative where enterprise orchestrators would be unnecessary overhead,
+It is designed as a small-scale alternative where enterprise orchestrators would be too much,
 focusing on clarity, ease of modification, and running on a single machine.
 
 It does NOT replace RPA tools.
@@ -55,7 +55,8 @@ They communicate through a file-based IPC mechanism (`handover.json`).
 
 ## Architecture
 
-<img width="1156" height="1921" alt="workflow" src="https://github.com/user-attachments/assets/c00d4ad7-a98e-4170-9b19-043f90f23c4b" />
+<img width="1140" height="1735" alt="workflow" src="https://github.com/user-attachments/assets/759db4e0-51c8-4b54-9925-b4081236bcc5" />
+
 
 The diagram defines the interaction:
 
