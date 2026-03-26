@@ -230,6 +230,8 @@ Enterprise orchestrators (e.g. UiPath Orchestrator, Control Room):
 * Require infrastructure, setup, and licensing
 * Are designed for large-scale, multi-bot environments
 
+This project intentionally avoids that scope and runs on a single machine with simple file- and DB-based state
+
 ---
 
 #### Why not use a workflow orchestrator?
@@ -240,10 +242,7 @@ Workflow tools (e.g. Airflow, Prefect) are built for:
 * Data engineering workflows
 * Distributed task execution
 
-This project instead focuses on:
-
-* Business-triggered jobs (email, ERP signals)
-* Tight coupling to UI automation (via RPA)
+This project is much smaller, local-first, and designed around business-triggered jobs (email, ERP signals) plus screen-based RPA
 
 ---
 ## What you will likely need to adapt
@@ -255,6 +254,7 @@ Most users will need to replace or customize:
 - the job handlers
 - the network health check path
 - the screen-recording destination
+- the operating hours
 - the RPA tool implementation
 
 ---
