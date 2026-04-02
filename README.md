@@ -39,12 +39,12 @@ to perform screen-based automation. Think of this as the control around the RPA 
 
 ## Job source examples
 
-The orchestrator supports two types of job sources: emails and data.
+The orchestrator supports two types of job sources: emails and queries.
 
 #### Email-driven job
 A user sends an email → Python validates and prepares the job → writes to `handover.json` → RPA executes UI actions → Python verifies and responds.
 
-#### Data-driven job
+#### Query-driven job
 Python polls a data source → detects a valid case → prepares payload → signals RPA → RPA executes → Python verifies the outcome.
 
 
@@ -78,9 +78,9 @@ This includes tools such as:
 * Microsoft Power Automate
 * UiPath Studio
 * Blue Prism
-* Robot Framework
-* TagUI
-* RPA for Python
+* [Robot Framework](https://github.com/robotframework/robotframework)
+* [TagUI](https://github.com/aisingapore/TagUI)
+* [RPA for Python](https://github.com/tebelorg/RPA-Python)
 
 These tools perform the actual UI interactions (clicks, keyboard input, screen automation).
 
@@ -96,8 +96,10 @@ The diagram shows how:
 * Both operate in their own loops
 * State is synchronized via `handover.json`
 * Failures transition the system into safestop
-* Your RPA tool must follow this model
 * Safestop is an emergency mode that breaks the loop
+* Your RPA tool must follow this model
+
+---
 
 ## Features
 
@@ -105,7 +107,7 @@ The diagram shows how:
 * Shared inbox support (partially implemented)
 * Data-driven jobs (ERP/data queries)
 * File-based IPC (`handover.json`)
-* SQLite audit logging (`job_audit.db`)
+* SQLite audit-style logging (`job_audit.db`)
 * Crash-safe mode (`safestop`)
 * Degraded emergency mode after fatal errors
 * Controlled restart mechanism (`restart.flag`)
@@ -119,33 +121,6 @@ The diagram shows how:
 
 ---
 
-
-## Job Sources
-
-The system supports multiple job producers:
-
-* Personal inbox (`personal_inbox`)
-* Shared mailbox (partially implemented)
-* Scheduled jobs (ERP/data queries)
-
-All sources produce standardized **candidates**, processed through a unified flow.
-
----
-
-## Job Lifecycle
-
-Jobs are tracked in SQLite (`job_audit.db`) with clear states:
-
-* `REJECTED` – invalid request / no access
-* `QUEUED` – waiting for RPA
-* `RUNNING` – RPA executing
-* `VERIFYING` – post-check (Python)
-* `DONE` – success
-* `FAIL` – error or verification failure
-
----
-
-
 ## Email Pipeline
 
 * Access controlled via `friends.xlsx`
@@ -156,7 +131,7 @@ Jobs are tracked in SQLite (`job_audit.db`) with clear states:
 
   * `DONE`
   * `FAIL`
-  * "lifesign" (once per day)
+  * "online lifesign" (once per day)
 
 ---
 
