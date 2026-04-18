@@ -93,7 +93,7 @@ class FakeEmailjobsGenerator:
             from_email="alice@example.com",
             to_email="robot@company.local",
             subject="PING",
-            body="Hello\nI'm sending you a ping\nBR,\n Alice",
+            body="Hello\nI'm sending you a ping\nBR,\nAlice",
         )
         return self.write_eml_to_inbox(msg, prefix="ping")
 
@@ -239,8 +239,7 @@ class FakeJobsGenerator:
         while True:
             try:
                 input("\nHit Enter to generate an random job")
-                if random.randint(0,1) == 1:
-                #if 1==1:
+                if random.randint(0,2) <= 1:
                     path = self.fake_emailjob.create_random_mail()
                     print(f"Created emailjob: {path.name}")
                 else:

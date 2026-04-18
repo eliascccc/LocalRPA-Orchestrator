@@ -36,123 +36,123 @@ class RPAToolSimulator:
         while True:
             print("[stopped] Press 1 to start the robot.")
             self.wait_for_command("1")
-            self.run_robot()
+            # --------------------------------------------------
+            # Cold start policy: reset handover.json on startup
+            # --------------------------------------------------
+            handover_data = {"ipc_state": "idle"}
+            with open("handover.json", "w", encoding="utf-8") as f:
+                json.dump(handover_data, f, indent=2)
 
-    def run_robot(self):
-        # --------------------------------------------------
-        # Cold start policy: reset handover.json on startup
-        # --------------------------------------------------
-        handover_data = {"ipc_state": "idle"}
-        with open("handover.json", "w", encoding="utf-8") as f:
-            json.dump(handover_data, f, indent=2)
+            # --------------------------------------------------
+            # Start main.py (RobotRuntime) async
+            # --------------------------------------------------
+            self.start_runtime_in_new_terminal()
+            print("[started] Press 2 to request stop.")
 
-        # --------------------------------------------------
-        # Start main.py (RobotRuntime) async
-        # --------------------------------------------------
-        self.start_runtime_in_new_terminal()
-        print("[started] Press 2 to request stop.")
+            # --------------------------------------------------
+            #  Enter normal polling loop
+            # --------------------------------------------------
+            while True:
+                # on operator stop request
+                if self.last_command == "2":
+                    self.last_command = None
+                    Path("stop.flag").write_text("", encoding="utf-8")
+                    self.log_system("stop.flag written by RPAToolSimulator")
+                    break
 
-        # --------------------------------------------------
-        #  Enter normal polling loop
-        # --------------------------------------------------
-        while True:
-            # operator stop request
-            if self.last_command == "2":
-                self.last_command = None
-                Path("stop.flag").write_text("", encoding="utf-8")
-                self.log_system("stop.flag written by RPAToolSimulator")
-                return
-
-            time.sleep(1)
-
-            try:
-                # read handover
-                with open("handover.json", "r", encoding="utf-8") as f:
-                    handover_data = json.load(f)
-
-                ipc_state = handover_data.get("ipc_state")
-                if ipc_state != "job_queued":
-                    continue
-
-               # claim workflow if "job_queued"
-                handover_data["ipc_state"] = "job_running"
-                with open("handover.json", "w", encoding="utf-8") as f:
-                    json.dump(handover_data, f, indent=2)
-
-                # identify job
-                job_type = handover_data.get("job_type")
-                job_id = handover_data.get("job_id")
-                rpatool_payload = handover_data.get("rpatool_payload")
-
-                if rpatool_payload is None:
-                    raise ValueError("did your forgot something?")
-
-                time.sleep(2)  # simulate processing time
-
-                # JOB1
-                if job_type == "job1":
-                    # retrive job-specific data 
-                    erp_order_number = rpatool_payload.get("order_number")
-                    new_qty = rpatool_payload.get("target_order_qty")
-
-                    # simulation of job1 screenactiviy
-                    self.log_system("activities on screen_1 in ERP completed", job_id)
-                    self.log_system("activities on screen_2 in ERP completed", job_id)
-                    self.simulate_rpa_result_job1(erp_order_number, new_qty)
-
-                    new_ipc_state = "job_verifying"
-                    
-
-                # JOB3
-                elif job_type == "job3":
-                    erp_order_number = rpatool_payload.get("source_ref")
-                    new_qty = rpatool_payload.get("target_order_qty")
-
-                    self.log_system("activities on screen_1 in ERP completed", job_id)
-                    self.log_system("activities on screen_2 in ERP completed", job_id)
-                    self.simulate_rpa_result_job1(erp_order_number, new_qty) # use job1 example         
-
-                    new_ipc_state = "job_verifying"
-
-                # PING
-                elif job_type == "ping":
-                    if platform.system() == "Windows":
-                        import winsound
-                        winsound.Beep(1000, 300)  # type: ignore
-                    elif platform.system() == "Linux":
-                        print("\a", end="", flush=True)
-
-                    self.log_system("made a ping", job_id)
-                    new_ipc_state = "job_verifying"
-
-                # UNKNOWN JOB
-                else:
-                    self.log_system(f"no logic for job_type={job_type}", job_id)
-                    new_ipc_state = "safestop"
-
-                # handover back to RobotRuntime
-                handover_data["ipc_state"] = new_ipc_state
-                with open("handover.json", "w", encoding="utf-8") as f:
-                    json.dump(handover_data, f, indent=2)
-
-                self.log_system(
-                    f"RPAToolSimulator done, ipc_state job_running -> {new_ipc_state}",
-                    job_id,
-                )
-
-            except Exception as e:
-                self.log_system(f"crash in polling loop: {e}")
+                time.sleep(1)
 
                 try:
-                    handover_data["ipc_state"] = "safestop"
-                except Exception:
-                    handover_data = {"ipc_state": "safestop"}
+                    # read handover
+                    with open("handover.json", "r", encoding="utf-8") as f:
+                        handover_data = json.load(f)
 
-                with open("handover.json", "w", encoding="utf-8") as f:
-                    json.dump(handover_data, f, indent=2)
+                    ipc_state = handover_data.get("ipc_state")
+                    if ipc_state != "job_queued":
+                        continue
+                
+                    time.sleep(1)
 
-                print("RPA tool entered safestop.")
-                return
+                # claim workflow if "job_queued"
+                    handover_data["ipc_state"] = "job_running"
+                    with open("handover.json", "w", encoding="utf-8") as f:
+                        json.dump(handover_data, f, indent=2)
+
+                    # identify job
+                    job_type = handover_data.get("job_type")
+                    job_id = handover_data.get("job_id")
+                    rpatool_payload = handover_data.get("rpatool_payload")
+
+                    #if rpatool_payload is None:
+                    #    raise ValueError("did your forgot something?")
+
+                    time.sleep(2)  # simulate processing time
+
+                    # JOB1
+                    if job_type == "job1":
+                        # retrive job-specific data 
+                        erp_order_number = rpatool_payload.get("order_number")
+                        new_qty = rpatool_payload.get("target_order_qty")
+
+                        # simulation of job1 screenactiviy
+                        self.log_system("activities on screen_1 in ERP completed", job_id)
+                        self.log_system("activities on screen_2 in ERP completed", job_id)
+                        self.simulate_rpa_result_job1(erp_order_number, new_qty)
+
+                        new_ipc_state = "job_verifying"
+                        
+
+                    # JOB3
+                    elif job_type == "job3":
+                        erp_order_number = rpatool_payload.get("source_ref")
+                        new_qty = rpatool_payload.get("target_order_qty")
+
+                        self.log_system("activities on screen_1 in ERP completed", job_id)
+                        self.log_system("activities on screen_2 in ERP completed", job_id)
+                        self.simulate_rpa_result_job1(erp_order_number, new_qty) # use job1 example         
+
+                        new_ipc_state = "job_verifying"
+
+                    # PING
+                    elif job_type == "ping":
+                        if platform.system() == "Windows":
+                            import winsound
+                            winsound.Beep(1000, 300)  # type: ignore
+                        elif platform.system() == "Linux":
+                            print("\a", end="", flush=True)
+
+                        self.log_system("made a ping", job_id)
+                        new_ipc_state = "job_verifying"
+
+                    # UNKNOWN JOB
+                    else:
+                        self.log_system(f"no logic for job_type={job_type}", job_id)
+                        new_ipc_state = "safestop"
+
+                    # handover back to RobotRuntime
+                    handover_data["ipc_state"] = new_ipc_state
+                    with open("handover.json", "w", encoding="utf-8") as f:
+                        json.dump(handover_data, f, indent=2)
+
+                    self.log_system(
+                        f"RPAToolSimulator done, ipc_state job_running -> {new_ipc_state}",
+                        job_id,
+                    )
+
+                except Exception as e:
+                    self.log_system(f"crash in polling loop: {e}")
+
+                    try:
+                        handover_data["ipc_state"] = "safestop"
+                    except Exception:
+                        handover_data = {"ipc_state": "safestop"}
+
+                    with open("handover.json", "w", encoding="utf-8") as f:
+                        json.dump(handover_data, f, indent=2)
+
+                    print("RPA tool entered safestop.")
+                    break
+        
 
     def wait_for_command(self, expected: str):
         while self.last_command != expected:
@@ -193,12 +193,10 @@ class RPAToolSimulator:
         script_path = os.path.abspath("main.py")
 
         if platform.system() == "Windows":
-            subprocess.Popen([
-                "powershell",
-                "-NoExit",
-                "-Command",
-                f'& "{python_exe}" "{script_path}"'
-            ])
+            subprocess.Popen(
+                [sys.executable, "main.py"],
+                creationflags=subprocess.CREATE_NEW_CONSOLE # type: ignore
+            )
             return
 
         python_cmd = f'"{python_exe}" "{script_path}"'
