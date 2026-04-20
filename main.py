@@ -114,6 +114,7 @@ class RuntimeFault(Exception):
         self.active_job = active_job
         self.cause = cause
         self.traceback_text = traceback_text
+        self.error_code = self.__class__.error_code
 
 class PreHandoverCrash(RuntimeFault):
     error_code = "PRE_HANDOVER_CRASH"
@@ -173,9 +174,15 @@ class ExampleMailBackend:
             msg = BytesParser(policy=policy.default).parse(f)
 
         from_name, from_address = parseaddr(msg.get("From", ""))
+        del from_name # not used
+
+        email_address = (from_address or "").strip().lower()
+        if not email_address or "@" not in email_address:
+            email_address = None
+
         email_subject = msg.get("Subject", "").strip()
 
-        del from_name # not used
+        
 
         # message_id = msg.get("Message-ID", "").strip()
         # not needed. source_ref is sufficient (in this example: Path.   In outlook: Outlook EntryID / Graph ID)
@@ -212,7 +219,7 @@ class ExampleMailBackend:
      
         return JobCandidate(
             source_ref=processing_path,
-            email_address=from_address.strip().lower(),
+            email_address=email_address,
             email_subject=email_subject,
             email_body=email_body,
             job_source_type=self.job_source_type,
@@ -525,7 +532,7 @@ class MailFlow:
                     action="REPLY_AND_DELETE",
                     job_status="REJECTED",
                     error_code="OUTSIDE_WORKING_HOURS",
-                    error_message="Outside working hours 05-23.",
+                    error_message="Outside robot's working hours 05-23.",
                     ui_log_message="--> rejected (outside working hours)",
                     system_log_message="--> rejected (outside working hours)",
                 )
@@ -538,7 +545,7 @@ class MailFlow:
                     job_type=None,
                     job_status="REJECTED",
                     error_code="UNKNOWN_JOB",
-                    error_message="Could not identify a job type.",
+                    error_message="Could not identify a job type from your email, check spelling and/or name for attached file(s).",
                     ui_log_message="--> rejected (unable to identify job type)",
                     system_log_message="--> rejected (unable to identify job type)",
                 )
@@ -549,7 +556,7 @@ class MailFlow:
                     job_type=job_type,
                     job_status="REJECTED",
                     error_code="NO_ACCESS",
-                    error_message=f"No access to {job_type}",
+                    error_message=f"Request denied, your email is not permitted to trigger '{job_type}'. Contact the robot administrator.",
                     ui_log_message=f"--> rejected (no access to {job_type})",
                     system_log_message=f"--> rejected (no access to {job_type})",
                 )
@@ -560,7 +567,7 @@ class MailFlow:
                     job_type=job_type,
                     job_status="REJECTED",
                     error_code="NO_NETWORK",
-                    error_message="No network connection. Your email was removed.",
+                    error_message="Robot has no network connection at the moment.",
                     ui_log_message="--> rejected (no network connection)",
                     system_log_message="--> rejected (no network connection)",
                 )
@@ -2190,9 +2197,12 @@ class FriendsRepository:
         return True
 
 
-    def is_allowed_sender(self, email_address: str) -> bool:
+    def is_allowed_sender(self, email_address: str | None) -> bool:
 
-        email = email_address.strip().lower()
+        if not email_address:
+            return False
+        
+        email = email_address.strip().lower()        
         return email in self.access_by_email
 
 
@@ -2273,10 +2283,12 @@ class NetworkService:
             return self.network_state
 
         try:
-            if self.NETWORK_HEALTHCHECK_PATH is None: online = True # demo assumption
-            os.listdir(self.NETWORK_HEALTHCHECK_PATH)
-            online = True
-            
+            if self.NETWORK_HEALTHCHECK_PATH is None: # demo assumption
+                online = True                         # demo assumption
+            else:
+                os.listdir(self.NETWORK_HEALTHCHECK_PATH)
+                online = True 
+
         except Exception:
             online = False
             
@@ -2368,9 +2380,8 @@ class AuditRepository:
         # drop None:s
         fields = {k: v for k, v in all_fields.items() if v is not None}
 
-        self.logger.system(f"received {fields}", job_id)
+        self.logger.system(f"received {fields}", job_id) # TODO: ensure email_address och email_subject are GDPR safe 
 
-    
         return fields
 
 
@@ -2395,7 +2406,6 @@ class AuditRepository:
         
         columns = ", ".join(fields.keys())
         placeholders = ", ".join("?" for _ in fields)
-
 
         with self._connect_with_retry() as conn:
             cur = conn.cursor()
@@ -2517,22 +2527,6 @@ class AuditRepository:
         return row[0] if row is not None else 0
 
 
-    def get_failed_jobs(self, days=7):
-        ''' not implemented '''
-        with self._connect_with_retry() as conn:
-            cur = conn.cursor()
-            cur.execute('''
-                SELECT job_id, email_address, job_type, error_code, error_message
-                FROM audit_log
-                WHERE job_status = 'FAIL'
-                AND job_start_date >= date('now', '-' || ? || ' days')
-                ORDER BY job_id DESC
-            ''', (days,))
-        res = cur.fetchall()
-        
-        return res
-
-
     def get_pending_reply_jobs(self) -> list[dict]:
         job_source_type: JobSourceType = "personal_inbox"
 
@@ -2541,7 +2535,7 @@ class AuditRepository:
             cur = conn.cursor()
             cur.execute(
                 '''
-                SELECT job_id, email_address, email_subject, source_ref, job_status, error_code, error_message
+                SELECT job_id, job_source_type, email_address, email_subject, source_ref, job_status, error_code, error_message
                 FROM audit_log
                 WHERE job_source_type = ?
                 AND COALESCE(final_reply_sent, 0) = 0
@@ -2661,6 +2655,7 @@ class SafeStopController:
                     handover_data = asdict(active_job)
                     with open("handover.json", "w", encoding="utf-8") as f:
                         json.dump(handover_data, f, indent=2)
+                        f.flush()
                 except Exception:
                     try: os.remove("handover.json")
                     except Exception as e: self.logger.system(e)
@@ -2705,7 +2700,7 @@ class SafeStopController:
     
     
     def _mark_faulted_pending_job_for_recovery(self, fault: RuntimeFault):
-        # update audit row to FAIL for pending reply jobs (consolidate this with send_recovery_replies ?)
+        # update audit row to FAIL for pending reply jobs
         job_id = fault.job_id
         error_code = fault.error_code
         error_message = fault.error_message
@@ -2734,7 +2729,7 @@ class SafeStopController:
             candidate = self.mail_backend_personal.parse_mail_file(processing_path)
 
             # silent delete non friends
-            if candidate.email_address is None or not self.friends_repo.is_allowed_sender(candidate.email_address):
+            if not self.friends_repo.is_allowed_sender(candidate.email_address):
                 try:
                     self.logger.ui(f"email recovered from {candidate.email_address}", blank_line_before=True)
                     self.logger.ui("--> rejected (not in friends.xlsx)")
@@ -2804,40 +2799,6 @@ class SafeStopController:
             email_subject = audit_row.get("email_subject"),
             email_body = "[ORIGINAL MESSAGE LOST]",
             source_data = {},
-            )
-
-
-    def send_recovery_replies(self, from_safestop:bool=False, from_initialize:bool=False,) -> None:
-        candidate: JobCandidate
-        #all_jobs: list[dict]
-    
-        all_jobs = self.audit_repo.get_pending_reply_jobs()
-
-        for audit_row in all_jobs:
-
-            job_id = audit_row.get("job_id")
-            source_ref = audit_row.get("source_ref")
-            
-            path = Path(source_ref)
-            if path.exists():
-                candidate = self.mail_backend_personal.parse_mail_file(str(path))
-                delete_after=True
-
-            else:
-                self.logger.system(f"missing processing file {source_ref}, fallback to build_candidate_from_audit()", job_id)
-                audit_row["error_code"]="RECOVERY_SOURCE_MISSING"
-                self.audit_repo.update_job(job_id=job_id, error_code=audit_row.get("error_code"))
-                candidate = self._build_candidate_from_audit(audit_row,)
-                delete_after=False
-        
-            # send and delete mail
-            self.notification_service.send_recovery_reply(audit_row, candidate, from_safestop, from_initialize, delete_after)      
-
-            self.logger.system(f"recovery reply sent", job_id)
-            
-            self.audit_repo.update_job(
-                job_id=job_id,
-                final_reply_sent=True,
             )
 
 
@@ -3016,57 +2977,6 @@ class SafeStopController:
             os._exit(1)
 
         time.sleep(1)
-        os._exit(0)
-
-
-    def restart_application_old(self) -> Never:
-        # written by AI
-    
-        self.logger.system("restarting application in new visible terminal")
- 
-        try:
-            self.set_ui_shutdown()
-        except Exception:
-            pass
-
-        try:
-            if platform.system() == "Windows":
-                # Open a new visible PowerShell window and run the same script
-                subprocess.Popen([
-                    "powershell",
-                    "-NoExit",
-                    "-Command",
-                    f'& "{sys.executable}" "{os.path.abspath(sys.argv[0])}"'
-                ])
-
-            else:
-                # Linux: open a new terminal window and run the same script
-                python_cmd = f'"{sys.executable}" "{os.path.abspath(sys.argv[0])}"'
-
-                terminal_candidates = [
-                    ["gnome-terminal", "--", "bash", "-lc", f"{python_cmd}; exec bash"],
-                    ["xfce4-terminal", "--hold", "-e", python_cmd],
-                    ["konsole", "-e", "bash", "-lc", f"{python_cmd}; exec bash"],
-                    ["xterm", "-hold", "-e", python_cmd],
-                ]
-
-                launched = False
-                for cmd in terminal_candidates:
-                    try:
-                        subprocess.Popen(cmd)
-                        launched = True
-                        break
-                    except FileNotFoundError:
-                        continue
-
-                if not launched:
-                    raise RuntimeError("No supported terminal emulator found for restart")
-
-        except Exception as e:
-            self.logger.system(e)
-            os._exit(1)
-
-        time.sleep(3)
         os._exit(0)
 
 
@@ -3614,6 +3524,8 @@ class RobotRuntime:
 
 
     def runtime_loop(self) -> None:
+        active_job: ActiveJob | None = None
+
         try:
             self.initialize_runtime()
             
