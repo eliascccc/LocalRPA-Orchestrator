@@ -8,6 +8,9 @@ Unlike traditional RPA setups, where users manually trigger automations, this ru
 
 The principle is: **UI interaction** is handled by the RPA tool. **Everything else (logic and orchestration)** is handled by this Python runtime.
 
+This repository includes a full demo setup (mail, ERP, and RPA tool simulation),
+so the system can be tested end-to-end without external dependencies.
+
 ---
 
 ## Example dashboard
@@ -52,8 +55,7 @@ The diagram shows:
 
 ## Features
 
-* Email-driven job processing (personal inbox)
-* Shared inbox support (partially implemented)
+* Email-driven job processing (personal inbox and shared inbox)
 * Query-driven jobs (ERP/data polling)
 * SQLite audit-style logging (`job_audit.db`)
 * Crash-safe mode (`safestop`)
@@ -82,6 +84,16 @@ The recommended (production-like) setup is to run `main.py` from the RPA tool ac
 The RPA tool starts and stops the runtime, which makes the robot behave as a single unit.
 
 ---
+### Quick demo
+
+1:  Start `rpa_tool_simulator.py`  
+2:  Press `1` to run the robot  
+3:  Open a new terminal and start fake_jobs_generator.py  
+4:  Press Enter to generate random jobs  
+5:  Watch the dashboard  
+(6: Add `custom_*_jobs.py` files for more examples)
+
+---
 
 ### Testing / development
 
@@ -90,11 +102,12 @@ Use the included dev tools to simulate real inputs and runtime behavior:
 * `fake_jobs_generator.py` – to generate test jobs (emails / data)
 * `rpa_tool_simulator.py` – to simulate the RPA tool and start main.py in the intended way
 
-Manual start is also possible
-```bash
-python main.py
-```
+Below files contain example job logic and are automatically loaded if present. Add your own query and/or email jobs by modifying them.
 
+* `custom_personal_mail_jobs.py`
+* `custom_shared_mail_jobs.py`
+* `custom_query_jobs.py`
+  
 ---
 
 ## Deployment requirements
