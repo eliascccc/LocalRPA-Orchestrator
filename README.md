@@ -1,19 +1,19 @@
 # Robot Runtime
 
-Robot Runtime is a local Python runtime for small-scale, event-driven RPA deployments.
+Robot Runtime is a local Python runtime for email- and query-driven RPA.
 It handles job intake, orchestration, business logic, and result verification, while delegating UI automation to an external RPA tool such as UiPath Studio or Power Automate.
 Together, this runtime and the RPA tool form the robot.
 
-Unlike traditional RPA setups, where users manually trigger automations, this runtime is driven by emails or queries. The runtime core lives in a single Python file (`main.py`) to keep things simple.
+Designed for small 'extra-laptop' deployments without prior infrastructure.
 
 The principle is: **UI interaction** is handled by the RPA tool. **Everything else (logic and orchestration)** is handled by this Python runtime.
 
-This repository includes a full demo setup (mail, ERP, and RPA tool simulation),
+This repository includes a full demo environment (mail, ERP, and RPA tool simulation),
 so the system can be tested end-to-end without external dependencies.
 
 ---
 
-## Example dashboard
+## Dashboard example 
 <img width="1209" height="635" alt="image" src="https://github.com/user-attachments/assets/5f16b39f-99b3-4c82-ad91-0b3092f3b516" />
 
 ---
@@ -55,16 +55,24 @@ The diagram shows:
 
 ## Features
 
-* Email-driven job processing (personal inbox and shared inbox)
+#### Core
+* Email-driven job processing (personal and shared inbox)
 * Query-driven jobs (ERP/data polling)
+* File-based handover (`handover.json`)
 * SQLite audit-style logging (`job_audit.db`)
+
+#### Reliability
 * Crash-safe mode (`safestop`)
-* Built-in screen recording (ffmpeg)
-* Final user replies for personal-inbox jobs after verification (DONE / FAIL)
-* Screen-recording link included in final reply
-* Runs without administrator rights
-* Single-file runtime (`main.py`) for easy sharing and inspection
-* Windows or Linux, with environment-specific setup
+* Recovery handling for interrupted jobs
+
+#### UX
+* Final user replies (DONE / FAIL)
+* Screen recording with playback link included in reply
+
+#### Runtime
+* Runs without admin rights
+* Single-file runtime (`main.py`)
+* Windows and Linux support
 
 ---
 
@@ -80,18 +88,20 @@ The diagram shows:
 
 ### Start
 
-The recommended (production-like) setup is to run `main.py` from the RPA tool according to architecture diagram.  
+The recommended (production-like) setup is to run `main.py` from the RPA tool according to the architecture diagram.  
 The RPA tool starts and stops the runtime, which makes the robot behave as a single unit.
 
 ---
+
+
 ### Quick demo
 
 1:  Start `rpa_tool_simulator.py`  
 2:  Press `1` to run the robot  
-3:  Open a new terminal and start fake_jobs_generator.py  
+3:  Open a new terminal and run fake_jobs_generator.py  
 4:  Press Enter to generate random jobs  
 5:  Watch the dashboard  
-(6: Add `custom_*_jobs.py` files for more examples)
+(6:  Add `custom_*_jobs.py` files for more examples)
 
 ---
 
