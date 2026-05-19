@@ -1,6 +1,6 @@
 # Place in main.py directory
 
-# Replace this file with your RPA Tool to do real screen automations, using below logic as a template 
+# Replace this file with your RPA tool to do real screen automations, using below logic as a template 
 # (or using the workflow diagram on github)
 
 from __future__ import annotations
@@ -17,7 +17,6 @@ from pathlib import Path
 
 from openpyxl import load_workbook  # type: ignore
 
-
 class RPAToolSimulator:
     """
     Simulates the external RPA tool. Simulates only the architecture, not any actual screen activities. 
@@ -28,30 +27,37 @@ class RPAToolSimulator:
     * Press 2 = press STOP in the RPA tool
     """
 
-    # ignore init constructor when building real RPA Tool
+    # ignore this when building real RPA tool
     def __init__(self) -> None:
         self.last_command: str | None = None
-
+        self.demo_stop_button_pressed = False
 
     def run(self):
         
-        # START and STOP button input runs in separate thread in this demo
-        threading.Thread(target=self._command_loop, daemon=True).start() # ignore building this in RPA Tool
-        
-        print(                                                            # simulation demo info 
-            "The RPA Tool application is now open, but the robot automation is not started.\n"
-            "Button 1 simulates the START/RUN button in the RPA Tool.\n"
+        print(
+            "The RPA tool application is now open, but the robot automation is not started.\n"
+            "Button 1 simulates the START/RUN button in the RPA tool.\n"
             "Button 2 simulates the STOP button.\n\n"
             "Press 1 to start the robot.\n"
             "Press 2 to stop it.\n\n"
             "Use fake_jobs_generator.py to simulate incoming work."
         )
-            
+        
         while True:
-            self.wait_for_command("1") # ignore building this in RPA Tool
+
+            # RPA tool stop button (ignore building this)
+            self.start_stop_button_simulation("1")
+            self.demo_stop_button_pressed = False
+            if Path("stop.flag").exists():
+                Path("stop.flag").unlink()
+
+
+            #--- start here building RPA tool according to below ---#
+            #--- (exclude all logic/loops above this pint)       ---#
+
 
             # --------------------------------------------------
-            # Cold start policy: reset handover.json on startup
+            # Reset handover.json on startup (cold start policy)
             # --------------------------------------------------
             handover_data = {"state": "idle"}
             with open("handover.json", "w", encoding="utf-8") as f:
@@ -66,26 +72,23 @@ class RPAToolSimulator:
             #  Enter normal loop
             # --------------------------------------------------
             while True:
-                # on 'stop button'
-                if self.last_command == "2":
-                    self.last_command = None
-                    Path("stop.flag").write_text("", encoding="utf-8")
-                    self.log_system("stop.flag written by RPAToolSimulator") # design decision, it's not necessary for RPA Tool to write a log
+                
+                # ignore building demo_stop_button_pressed
+                if self.demo_stop_button_pressed:
                     break
 
                 time.sleep(1)
 
                 try:
-                    
                     # read handover
                     with open("handover.json", "r", encoding="utf-8") as f:
                         handover_data = json.load(f)
 
+                    # claim workflow if "job_queued"
                     state = handover_data.get("state")
                     if state != "job_queued":
                         continue
 
-                    # claim workflow if "job_queued"
                     handover_data["state"] = "job_running"
                     with open("handover.json", "w", encoding="utf-8") as f:
                         json.dump(handover_data, f, indent=2)
@@ -158,29 +161,34 @@ class RPAToolSimulator:
 
                     self.log_system(f"workflow completed, state job_running -> {new_state}", job_id)
 
-
                 except Exception as e:
-                    self.log_system(f"crash in RPA Tool loop: {e}")
+                    self.log_system(f"crash in RPA tool loop: {e}")
 
                     handover_data["state"] = "safestop"
                     with open("handover.json", "w", encoding="utf-8") as f:
                         json.dump(handover_data, f, indent=2)
         
-
-    def wait_for_command(self, expected: str):
+    def start_stop_button_simulation(self, expected: str):
         while self.last_command != expected:
             time.sleep(0.1)
         self.last_command = None
-
 
     def _command_loop(self):
         while True:
             try:
                 cmd = input("> ").strip().lower()
-                if cmd in ("1", "2"):
-                    self.last_command = cmd
+
+                if cmd == "1":
+                    self.last_command = "1"
+
+                elif cmd == "2":
+                    self.demo_stop_button_pressed = True
+                    Path("stop.flag").write_text("", encoding="utf-8")
+                    self.log_system("stop.flag written by RPAToolSimulator")
+
                 else:
                     print("Unknown command. Use 1 or 2.")
+
             except Exception as e:
                 print(f"Command loop error: {e}")
 
@@ -201,7 +209,6 @@ class RPAToolSimulator:
 
         wb.close()
         return False
-
 
     def start_runtime_in_new_terminal(self):
         python_exe = sys.executable
@@ -231,24 +238,26 @@ class RPAToolSimulator:
 
         raise RuntimeError("No supported terminal emulator found")
 
-
     def log_system(self, event_text: str, job_id=None):
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         job_id_text = "" if job_id is None else str(job_id)
 
-        log_line = f"{timestamp} | rpa | job_id={job_id_text} | RPAToolSimulator...() | {event_text}"
+        log_line = f"{timestamp} | RPA | job_id={job_id_text} | RPAToolSimulator...() | {event_text}"
 
         with open("system.log", "a", encoding="utf-8") as f:
             f.write(log_line + "\n")
             f.flush()
 
-
 def main():
     if not os.path.isfile("main.py"):
         raise RuntimeError("Place this file in main.py directory")
+    
+    simulator = RPAToolSimulator()
 
-    RPAToolSimulator().run()
-
+    # run START and STOP button in separate thread in this demo
+    threading.Thread(target=simulator._command_loop, daemon=True).start()
+        
+    simulator.run()
 
 if __name__ == "__main__":
     main()

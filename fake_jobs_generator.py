@@ -7,7 +7,6 @@ from email.message import EmailMessage
 from email.utils import formatdate, make_msgid
 from openpyxl import load_workbook  # type: ignore
 
-
 class FakeEmailJobsGenerator:
     """to create fake email jobs"""
 
@@ -105,7 +104,7 @@ class FakeEmailJobsGenerator:
     def create_valid_qty_adjust_mail(self) -> Path:
         msg = self.build_email_message(
             from_name="Bob Tester",
-            from_email="bob@test.com",
+            from_email="bob@example.com",
             to_email="robot@company.local",
             subject="qty_adjust",
             body=(
@@ -113,14 +112,13 @@ class FakeEmailJobsGenerator:
                 "Please run qty_adjust\n\n"
                 "order_number: 100245\n"
                 "order_qty: 12000\n"
-                "material_available: 11031\n\n"
+                "target_qty: 11031\n\n"
                 "Best regards,\n"
                 "Bob\n"
             ),
             #attachment_paths=[self.ATTACHMENTS_DIR / "qty_adjust_request.txt"],
         )
         return self.write_eml(msg, self.PERSONAL_INBOX_DIR, prefix="qty_adjust")
-
 
     def create_blocked_sender_mail(self) -> Path:
         msg = self.build_email_message(
