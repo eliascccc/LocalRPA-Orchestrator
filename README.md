@@ -6,10 +6,9 @@ Together, this runtime and the RPA tool form the robot.
 
 It is designed for small 'extra-laptop' deployments without prior infrastructure.
 
-This repository includes a full demo environment (mail, ERP, and RPA tool simulation),
-so the system can be tested end-to-end without external dependencies.
-
 The principle is: **UI interaction** is handled by the RPA tool. **The rest (logic and orchestration)** is handled by this Python runtime.
+
+This repository includes a full demo environment (mail, ERP, and RPA tool simulation), plus a fake job generator for testing the system end-to-end.
 
 ---
 
@@ -67,7 +66,7 @@ The diagram shows:
 
 #### UX
 * Final user replies (DONE / FAIL)
-* Screen recording with playback link included in reply
+* Screen recording with playback link included in personal inbox replies
 
 #### Runtime
 * Runs without admin rights
@@ -112,12 +111,12 @@ Use the included dev tools to simulate real inputs and runtime behavior:
 * `fake_jobs_generator.py` – to generate test jobs (emails / data)
 * `rpa_tool_simulator.py` – to simulate the RPA tool and start main.py in the intended way
 
-Below files contain example job logic and are automatically loaded if present. Add your own query and/or email jobs by modifying them.
+Below files contain example job handlers and are automatically loaded if present. Add your own query and/or email jobs by modifying them.
 
 * `custom_personal_mail_jobs.py`
 * `custom_shared_mail_jobs.py`
 * `custom_query_jobs.py`
-  
+
 ---
 
 ## Deployment requirements
