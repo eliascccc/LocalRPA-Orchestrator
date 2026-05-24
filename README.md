@@ -13,7 +13,8 @@ This repository includes a full demo environment (mail, ERP, and RPA tool simula
 ---
 
 ## Dashboard example 
-<img width="1209" height="635" alt="image" src="https://github.com/user-attachments/assets/5f16b39f-99b3-4c82-ad91-0b3092f3b516" />
+<img width="1209" height="635" alt="d" src="https://github.com/user-attachments/assets/1ea44b6b-2085-498d-a477-3b0bdd2577fa" />
+
 
 ---
 
