@@ -84,10 +84,10 @@ class RobotRuntimeFault(Exception):
     def __init__(self, phase: RuntimePhase, message:str|None=None,  handover_file:HandoverFile|None=None, active_job: ActiveJob | None = None, error_code: LifecycleErrorCode = "CODE_ERROR", cause:Exception|None=None, traceback_text:str|None=None):
         super().__init__(message)
         self.error_message = message
-        self.phase = phase
+        self.phase: RuntimePhase = phase
         self.active_job = active_job
         self.handover_file = handover_file
-        self.error_code = error_code
+        self.error_code: LifecycleErrorCode = error_code
         self.cause = cause
         self.traceback_text = traceback_text
 
@@ -147,279 +147,269 @@ if __name__ == "__main__": sys.modules.setdefault("main", sys.modules[__name__])
 # BACKENDS
 # ============================================================
 
-try: 
-    from custom_backends import build_backends # type: ignore
-except ImportError: 
-    build_backends = None
+class DemoMailBackend:
+    """Demo mailbox simulated with local folders and .eml files (replace w/ eg. Outlook)"""
 
-    # a funny way to not load demo backends if custom backens are avaliable
-    class DemoMailBackend:
-        """Demo mailbox simulated with local folders and .eml files (replace w/ eg. Outlook)"""
+    MAIL_STATUS_PREFIXES = ("PROCESSING", "DONE", "FAIL")
 
-        MAIL_STATUS_PREFIXES = ("PROCESSING", "DONE", "FAIL")
+    def __init__(self, source_type) -> None:
+        self.source_type = source_type
+        self.inbox_dir = Path(self.source_type) / "inbox"
+        self.inbox_dir.mkdir(parents=True, exist_ok=True)
 
-        def __init__(self, logger, source_type) -> None:
-            self.logger = logger
-            self.source_type = source_type
-            self.inbox_dir = Path(self.source_type) / "inbox"
-            self.inbox_dir.mkdir(parents=True, exist_ok=True)
+    def list_inbox_mail_paths(self, max_items=None) -> list[str]:
+        paths_raw = sorted(self.inbox_dir.glob("*.eml"))
 
-        def list_inbox_mail_paths(self, max_items=None) -> list[str]:
-            paths_raw = sorted(self.inbox_dir.glob("*.eml"))
+        if max_items is not None:
+            paths_raw = paths_raw[:max_items]
 
-            if max_items is not None:
-                paths_raw = paths_raw[:max_items]
+        paths = [str(x) for x in paths_raw] #convert Path-type to str
+        return paths
 
-            paths = [str(x) for x in paths_raw] #convert Path-type to str
-            return paths
+    def parse_mail_file(self, mail_path) -> ActiveJob:
+        with open(mail_path, "rb") as f:
+            msg = BytesParser(policy=policy.default).parse(f)
 
-        def parse_mail_file(self, mail_path) -> ActiveJob:
-            with open(mail_path, "rb") as f:
-                msg = BytesParser(policy=policy.default).parse(f)
+        from_name, from_address = parseaddr(msg.get("From", ""))
+        del from_name # not used
 
-            from_name, from_address = parseaddr(msg.get("From", ""))
-            del from_name # not used
+        email_address = (from_address or "").strip().lower()
+        if not email_address or "@" not in email_address:
+            email_address = None
 
-            email_address = (from_address or "").strip().lower()
-            if not email_address or "@" not in email_address:
-                email_address = None
+        email_subject = msg.get("Subject", "").strip()
 
-            email_subject = msg.get("Subject", "").strip()
+        # not needed in demo
+        # message_id = msg.get("Message-ID", "").strip()    # eg. Outlook EntryID / Graph ID in real backend
+        # raw_headers = {k: str(v) for k, v in msg.items()} # good for troubleshooting metadata 
 
-            # not needed in demo
-            # message_id = msg.get("Message-ID", "").strip()    # eg. Outlook EntryID / Graph ID in real backend
-            # raw_headers = {k: str(v) for k, v in msg.items()} # good for troubleshooting metadata 
-
-            if msg.is_multipart():
-                body_parts = []
-                for part in msg.walk():
-                    if part.get_content_type() == "text/plain" and not part.get_filename():
-                        try:
-                            body_parts.append(part.get_content())
-                        except Exception:
-                            pass
-                email_body = "\n".join(body_parts).strip()
-            else:
-                try:
-                    email_body = msg.get_content().strip()
-                except Exception:
-                    email_body = ""
-            
-
-            attachments = {}
-            # placeholder for implementation
-
-            return ActiveJob(
-                source_ref=mail_path,
-                email_address=email_address,
-                email_subject=email_subject,
-                email_body=email_body,
-                source_type=self.source_type,
-                source_data=attachments,
-                )
-
-        def mark_processing(self, active_job: ActiveJob) -> ActiveJob:
-            original_subject = self._strip_status_prefix(active_job.email_subject)
-            new_subject = f"PROCESSING/{self._today_yyyymmdd()}/{original_subject}"
-            return self._set_subject(active_job, new_subject)
-
-        def mark_done(self, active_job: ActiveJob) -> ActiveJob:
-            original_subject = self._strip_status_prefix(active_job.email_subject)
-            new_subject = f"DONE/{self._today_yyyymmdd()}/{original_subject}"
-            return self._set_subject(active_job, new_subject)
-
-        def mark_failed(self, active_job: ActiveJob) -> ActiveJob:
-            original_subject = self._strip_status_prefix(active_job.email_subject)
-            new_subject = f"FAIL/{self._today_yyyymmdd()}/{original_subject}"
-            return self._set_subject(active_job, new_subject)
-
-        def send_reply(self, active_job: ActiveJob, extra_subject: str, extra_body: str) -> None:
-
-            reply_to = active_job.email_address
-
-            original_subject = self._strip_status_prefix(active_job.email_subject)
-            subject = f"{extra_subject} re: {original_subject}"
-
-            body = (
-                f"{extra_body} \n\n"
-                f"-------------------------------------------------------------\n"
-                f"{active_job.email_body}"
-            ) # In a real mail backend, this should use the native reply mechanism.
-
-            self.logger.system(f"message sent, with body={body[:100]}... (GDPR sanitized)", active_job.job_id)
-            
-            if reply_to is None:
-                raise ValueError("cannot send reply because active_job.email_address is None")
-            
-            self._print_email_preview(reply_to, subject, body)
-                        
-        def delete(self, active_job: ActiveJob, fallback_status: Literal["DONE", "FAIL"]) -> None:
-            self.logger.system(f"removing {active_job.source_ref}", active_job.job_id)
-
+        if msg.is_multipart():
+            body_parts = []
+            for part in msg.walk():
+                if part.get_content_type() == "text/plain" and not part.get_filename():
+                    try:
+                        body_parts.append(part.get_content())
+                    except Exception:
+                        pass
+            email_body = "\n".join(body_parts).strip()
+        else:
             try:
-                os.remove(active_job.source_ref)
+                email_body = msg.get_content().strip()
+            except Exception:
+                email_body = ""
+        
 
-            except Exception as err:
-                if (self._has_status_prefix(active_job, "DONE") or self._has_status_prefix(active_job, "FAIL")):
-                    self.logger.system(f"delete failed, but mail already has final status prefix. error={err}", active_job.job_id)
-                    return
+        attachments = {}
+        # placeholder for implementation
 
-                if fallback_status == "DONE":
-                    self.mark_done(active_job)
+        return ActiveJob(
+            source_ref=mail_path,
+            email_address=email_address,
+            email_subject=email_subject,
+            email_body=email_body,
+            source_type=self.source_type,
+            source_data=attachments,
+            )
 
-                elif fallback_status == "FAIL":
-                    self.mark_failed(active_job)
+    def mark_processing(self, active_job: ActiveJob) -> ActiveJob:
+        original_subject = self._strip_status_prefix(active_job.email_subject)
+        new_subject = f"PROCESSING/{self._today_yyyymmdd()}/{original_subject}"
+        return self._set_subject(active_job, new_subject)
 
-                self.logger.system(f"delete failed, fallback marked subject {fallback_status}: {err}", active_job.job_id,)
+    def mark_done(self, active_job: ActiveJob) -> ActiveJob:
+        original_subject = self._strip_status_prefix(active_job.email_subject)
+        new_subject = f"DONE/{self._today_yyyymmdd()}/{original_subject}"
+        return self._set_subject(active_job, new_subject)
 
-        def sent_reply_exists(self, source_ref) -> bool:
-            '''an extra check in real backend sent folder, used to avoid duble user reply in error handling'''
-            
-            # placeholder for implementaton
-            # if active_job.source_ref exists in personal sent mail from robot, return True
-            # (job_id is present in all sent mails, except the 'online notice' mail, as 'tag' under robot_signature)
-            return False
+    def mark_failed(self, active_job: ActiveJob) -> ActiveJob:
+        original_subject = self._strip_status_prefix(active_job.email_subject)
+        new_subject = f"FAIL/{self._today_yyyymmdd()}/{original_subject}"
+        return self._set_subject(active_job, new_subject)
 
-        def _today_yyyymmdd(self) -> str:
-            return datetime.datetime.now().strftime("%Y%m%d")
+    def send_reply(self, active_job: ActiveJob, extra_subject: str, extra_body: str) -> None:
 
-        def _strip_status_prefix(self, subject: str | None) -> str:
-            subject = (subject or "").strip()
+        reply_to = active_job.email_address
 
-            for status in self.MAIL_STATUS_PREFIXES:
-                pattern = rf"^{status}/\d{{8}}/(.*)$"
-                match = re.match(pattern, subject, flags=re.IGNORECASE)
-                if match:
-                    return match.group(1).strip()
+        original_subject = self._strip_status_prefix(active_job.email_subject)
+        subject = f"{extra_subject} re: {original_subject}"
 
-            return subject
-
-        def _has_status_prefix(self, active_job: ActiveJob, status: str | None = None) -> bool:
-            subject = (active_job.email_subject or "").strip()
-
-            if status is not None:
-                return bool(re.match(rf"^{status}/\d{{8}}/", subject, flags=re.IGNORECASE))
-
-            return bool(re.match(r"^(PROCESSING|DONE|FAIL)/\d{8}/", subject, flags=re.IGNORECASE))
-
-        def _set_subject(self, active_job: ActiveJob, new_subject: str) -> ActiveJob:
-            """ Demo backend: update Subject inside the .eml file, real Outlook backend: use native subject rename."""
-            path = Path(active_job.source_ref)
-
-            with open(path, "rb") as f:
-                msg = BytesParser(policy=policy.default).parse(f)
-
-            if "Subject" in msg:
-                msg.replace_header("Subject", new_subject)
-            else:
-                msg["Subject"] = new_subject
-
-            with open(path, "wb") as f:
-                f.write(msg.as_bytes(policy=policy.default))
-
-            active_job.email_subject = new_subject
-            self.logger.system(f"renamed mail subject to {new_subject}", active_job.job_id)
-
-            return active_job
-
-        def _print_email_preview(self, reply_to: str, subject: str, body: str):
-
-            print(
-            "\n" + "="*72 +
-            "\n📧 EMAIL REPLY PREVIEW\n" +
-            "="*72 +
-            f"\nFrom:    robot@backend_example.com"
-            f"\nTo:      {reply_to}"
-            f"\nSubject: {subject}"
-            f"\nDate:    {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-            "\n" + "-"*72 +
-            f"\n{body}\n" +
-            "="*72 + "\n"
-        )
-
-
-    class DemoErpBackend:
-        """Demo ERP backend simulated with an Excel file."""
-
-        def order_adjust_selection_rows(self, path="Demo_ERP_table.xlsx") -> list[dict]:
-            '''this demo query is triggered by a job in custom_queryjobs.py'''
-
-
-            self._ensure_demo_erp_exists(path)
-
-            try:
-                wb = load_workbook(path)
-            except BadZipFile:
-                time.sleep(1)
-                wb = load_workbook(path)
-
-            ws = wb.active
-
-            assert ws is not None #to satisfy pylance
-
-            all_rows=[]
-
-            for row in ws.iter_rows(min_row=2):  # skip header
-                
-                source_ref = row[0].value
-                order_qty = row[1].value
-                material_available = row[2].value
-
-                if order_qty != material_available:
-
-                    all_rows.append({
-                            "source_ref": source_ref,
-                            "order_qty": order_qty,
-                            "material_available": material_available,
-                        })
+        body = (
+            f"{extra_body} \n\n"
+            f"-------------------------------------------------------------\n"
+            f"{active_job.email_body}"
+        ) # In a real mail backend, this should use the native reply mechanism.
+        
+        if reply_to is None:
+            raise ValueError("cannot send reply because active_job.email_address is None")
+        
+        self._print_email_preview(reply_to, subject, body)
                     
-            wb.close()
-            return all_rows
-            
-        def get_order_qty(self, source_ref, path="Demo_ERP_table.xlsx") -> int | None:
-            self._ensure_demo_erp_exists(path)
+    def delete(self, active_job: ActiveJob, fallback_status: Literal["DONE", "FAIL"]) -> None:
+        try:
+            os.remove(active_job.source_ref)
 
-            try:
-                wb = load_workbook(path)
-            except BadZipFile:
-                time.sleep(1)
-                wb = load_workbook(path)
-
-            ws = wb.active
-            assert ws is not None #to satisfy pylance
-
-            for row in ws.iter_rows(min_row=2):
-                cell_source_ref = row[0].value
-
-                if str(cell_source_ref) == str(source_ref):
-                    value = row[1].value  # order_qty
-
-                    if isinstance(value, int):
-                        wb.close()
-                        return int(value)
-                    
-                    else: 
-                        raise ValueError(f"order_qty: {value} is not INT")
-            
-            wb.close()
-            return None
-
-        def _ensure_demo_erp_exists(self, path="Demo_ERP_table.xlsx") -> None:
-            """Create the demo ERP table if it does not exist."""
-            if os.path.exists(path):
+        except Exception as err:
+            if (self._has_status_prefix(active_job, "DONE") or self._has_status_prefix(active_job, "FAIL")):
+                # delete failed, but mail already has final status prefix
                 return
 
-            wb = Workbook()
-            ws = wb.active
-            assert ws is not None #to satisfy pylance
+            if fallback_status == "DONE":
+                self.mark_done(active_job)
 
-            # headers
-            ws["A1"] = "source_ref"
-            ws["B1"] = "order_qty"
-            ws["C1"] = "material_available"
+            elif fallback_status == "FAIL":
+                self.mark_failed(active_job)
 
-            wb.save(path)
-            wb.close()
+    def sent_reply_exists(self, source_ref) -> bool:
+        '''an extra check in real backend sent folder, used to avoid duble user reply in error handling'''
+        
+        # placeholder for implementaton
+        # if active_job.source_ref exists in personal sent mail from robot, return True
+        # (job_id is present in all sent mails, except the 'online notice' mail, as 'tag' under robot_signature)
+        return False
+
+    def _today_yyyymmdd(self) -> str:
+        return datetime.datetime.now().strftime("%Y%m%d")
+
+    def _strip_status_prefix(self, subject: str | None) -> str:
+        subject = (subject or "").strip()
+
+        for status in self.MAIL_STATUS_PREFIXES:
+            pattern = rf"^{status}/\d{{8}}/(.*)$"
+            match = re.match(pattern, subject, flags=re.IGNORECASE)
+            if match:
+                return match.group(1).strip()
+
+        return subject
+
+    def _has_status_prefix(self, active_job: ActiveJob, status: str | None = None) -> bool:
+        subject = (active_job.email_subject or "").strip()
+
+        if status is not None:
+            return bool(re.match(rf"^{status}/\d{{8}}/", subject, flags=re.IGNORECASE))
+
+        return bool(re.match(r"^(PROCESSING|DONE|FAIL)/\d{8}/", subject, flags=re.IGNORECASE))
+
+    def _set_subject(self, active_job: ActiveJob, new_subject: str) -> ActiveJob:
+        """ Demo backend: update the .eml file, real Outlook backend: use native subject rename."""
+        path = Path(active_job.source_ref)
+
+        with open(path, "rb") as f:
+            msg = BytesParser(policy=policy.default).parse(f)
+
+        if "Subject" in msg:
+            msg.replace_header("Subject", new_subject)
+        else:
+            msg["Subject"] = new_subject
+
+        with open(path, "wb") as f:
+            f.write(msg.as_bytes(policy=policy.default))
+
+        active_job.email_subject = new_subject
+
+        return active_job
+
+    def _print_email_preview(self, reply_to: str, subject: str, body: str):
+
+        print(
+        "\n" + "="*72 +
+        "\n📧 EMAIL REPLY PREVIEW\n" +
+        "="*72 +
+        f"\nFrom:    robot@backend_example.com"
+        f"\nTo:      {reply_to}"
+        f"\nSubject: {subject}"
+        f"\nDate:    {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        "\n" + "-"*72 +
+        f"\n{body}\n" +
+        "="*72 + "\n"
+    )
+
+
+class DemoErpBackend:
+    """Demo ERP backend simulated with an Excel file."""
+
+    def order_adjust_selection_rows(self, path="Demo_ERP_table.xlsx") -> list[dict]:
+        '''this demo query is triggered by a job in custom_queryjobs.py'''
+
+
+        self._ensure_demo_erp_exists(path)
+
+        try:
+            wb = load_workbook(path)
+        except BadZipFile:
+            time.sleep(1)
+            wb = load_workbook(path)
+
+        ws = wb.active
+
+        assert ws is not None #to satisfy pylance
+
+        all_rows=[]
+
+        for row in ws.iter_rows(min_row=2):  # skip header
+            
+            source_ref = row[0].value
+            order_qty = row[1].value
+            material_available = row[2].value
+
+            if order_qty != material_available:
+
+                all_rows.append({
+                        "source_ref": source_ref,
+                        "order_qty": order_qty,
+                        "material_available": material_available,
+                    })
+                
+        wb.close()
+        return all_rows
+        
+    def get_order_qty(self, source_ref, path="Demo_ERP_table.xlsx") -> int | None:
+        self._ensure_demo_erp_exists(path)
+
+        try:
+            wb = load_workbook(path)
+        except BadZipFile:
+            time.sleep(1)
+            wb = load_workbook(path)
+
+        ws = wb.active
+        assert ws is not None #to satisfy pylance
+
+        for row in ws.iter_rows(min_row=2):
+            cell_source_ref = row[0].value
+
+            if str(cell_source_ref) == str(source_ref):
+                value = row[1].value  # order_qty
+
+                if isinstance(value, int):
+                    wb.close()
+                    return int(value)
+                
+                else: 
+                    raise ValueError(f"order_qty: {value} is not INT")
+        
+        wb.close()
+        return None
+
+    def _ensure_demo_erp_exists(self, path="Demo_ERP_table.xlsx") -> None:
+        """Create the demo ERP table if it does not exist."""
+        if os.path.exists(path):
+            return
+
+        wb = Workbook()
+        ws = wb.active
+        assert ws is not None #to satisfy pylance
+
+        # headers
+        ws["A1"] = "source_ref"
+        ws["B1"] = "order_qty"
+        ws["C1"] = "material_available"
+
+        wb.save(path)
+        wb.close()
+
+# import custom_backends.py will override demo backends
+try: from custom_backends import build_custom_backends # type: ignore
+except ImportError: build_custom_backends = None
 
 
 # ============================================================
@@ -460,14 +450,14 @@ class MailFlow:
 
         for path in personal_inbox_paths:
             active_job = self.personal_mailbox.parse_mail_file(path)
-            
-            if self.personal_mailbox._has_status_prefix(active_job, "PROCESSING"):
-                raise RobotRuntimeFault(message="stale personal mail found with subject prefix", phase="poll_intake", error_code="PRE_HANDOVER_CRASH", active_job=active_job)
-            
+
             if self.personal_mailbox._has_status_prefix(active_job, "DONE"):
                 continue
             if self.personal_mailbox._has_status_prefix(active_job, "FAIL"):
                 continue
+            
+            if self.personal_mailbox._has_status_prefix(active_job, "PROCESSING"):
+                raise RobotRuntimeFault(message="stale personal mail found with subject prefix", phase="poll_intake", error_code="PRE_HANDOVER_CRASH", active_job=active_job)
             
             self._handle_personal_mail(active_job)
             return True
@@ -488,24 +478,13 @@ class MailFlow:
         for path in shared_inbox_paths:
             active_job = self.shared_mailbox.parse_mail_file(path)
 
-            # stale processing mail = previous crash
-            if self.shared_mailbox._has_status_prefix(active_job, "PROCESSING"):
-                existing = self.audit.find_latest_by_source_ref(active_job.source_ref)
-                if existing:
-                    self.audit.mark_failed(
-                        job_id=existing["job_id"],
-                        error_code="PRE_HANDOVER_CRASH",
-                        error_message="stale shared PROCESSING mail found",
-                    )
-                self.shared_mailbox.mark_failed(active_job)
-                self.logger.system(f"stale shared mail marked FAIL: {active_job.source_ref}")
-                self.logger.ui("--> fail (stuck mail)")
-                return True
-
             # already handled shared mail
             if self.shared_mailbox._has_status_prefix(active_job, "DONE"):
                 continue
             if self.shared_mailbox._has_status_prefix(active_job, "FAIL"):
+                continue
+            if self.shared_mailbox._has_status_prefix(active_job, "PROCESSING"):
+                self.logger.system(f"WARN: stale shared mail found with source_ref={active_job.source_ref}")
                 continue
 
             # not our job
@@ -828,7 +807,7 @@ class PingHandler:
         '''
         verify_result() must return:
         - success, or
-        - failure with error_code=POST_HANDOVER_... and public_error_message.
+        - failure with error_code=POST_HANDOVER_... and public_error_message
         
         Other outcomes are treated as programming/system faults by RobotRuntime. 
         '''
@@ -1058,13 +1037,13 @@ class JobLifecycleService:
     def skip_shared_mail(self, active_job: ActiveJob, error_code: LifecycleErrorCode, reason: str, ui_log: str | None = None,) -> None:
         lifecycle_status: LifecycleStatus = "FAIL"
         
-        self.logger.system("running", active_job.job_id)
+        if active_job.job_id is not None:
+            raise ValueError("skip_shared_mail should only be called in early lifecycle")
+        
+        self.logger.system("running")
 
         if ui_log:
             self.logger.ui(ui_log)
-
-        if active_job.job_id is not None:
-            raise ValueError("skip_shared_mail should only be called in early lifecycle")
         
         active_job.job_id = self.generate_job_id()
 
@@ -1247,7 +1226,7 @@ class JobLifecycleService:
         
     def complete_from_handover(self, handover_file: HandoverFile) -> None:
         active_job: ActiveJob
-        jobhandler_verification_result: PrecheckResult | None = None
+        jobhandler_verification_result: VerificationResult | None = None
         phase: RuntimePhase = "verification"
         error_code: LifecycleErrorCode = "POST_HANDOVER_UNSPEC_CRASH"
 
@@ -1265,7 +1244,7 @@ class JobLifecycleService:
             if handler == None:
                 raise ValueError(f"handler missing for job_name={active_job.job_name}")
 
-            jobhandler_verification_result = handler.verify_result(handover_file)
+            jobhandler_verification_result = handler.verify_result(active_job)
             if jobhandler_verification_result is None:
                 raise ValueError(f"handler for job_name={active_job.job_name} returned no result")
             
@@ -1363,7 +1342,7 @@ class JobLifecycleService:
         else:
             raise ValueError(f"unknown active_job.source_type={active_job.source_type}")
 
-    def _complete_failed_result(self, active_job: ActiveJob, jobhandler_verification_result: PrecheckResult) -> None:
+    def _complete_failed_result(self, active_job: ActiveJob, jobhandler_verification_result: VerificationResult) -> None:
         lifecycle_status: LifecycleStatus = "FAIL"
                                                    
         self.audit.mark_failed(
@@ -1402,7 +1381,7 @@ class JobLifecycleService:
             try: self._show_recording_overlay()
             except Exception as e: self.logger.system(f"error {e}", active_job.job_id)
 
-    def _validate_format(self, jobhandler_verification_result: PrecheckResult):
+    def _validate_format(self, jobhandler_verification_result: VerificationResult):
         allowed_error_codes:list[LifecycleErrorCode] = ["POST_HANDOVER_VERIFICATION_MISMATCH", "POST_HANDOVER_VERIFICATION_TIMEOUT", "POST_HANDOVER_UNSPEC_CRASH"]
         
         if jobhandler_verification_result.is_success:
@@ -1428,7 +1407,8 @@ class JobLifecycleService:
 class UserNotificationService:
     """Only for personal_inbox user replies."""
 
-    def __init__(self, personal_mailbox, friends_repo, config: RuntimeConfig):
+    def __init__(self, logger, personal_mailbox, friends_repo, config: RuntimeConfig):
+        self.logger = logger
         self.personal_mailbox = personal_mailbox
         self.friends_repo = friends_repo
         self.config = config
@@ -1743,6 +1723,8 @@ class UserNotificationService:
             extra_body=extra_body,
         )
 
+        self.logger.system(f"message sent with extra_body={extra_body[:100]}... (GDPR sanitized)", active_job.job_id)
+
 
 # ============================================================
 # RECORDING / SAFESTOP / INFRASTRUCTURE
@@ -1792,7 +1774,7 @@ class RecordingService:
                     
                     if not self._ffmpeg_warned:
                         message = (
-                            "FFMPEG NOT FOUND\n\n"
+                            "FFMPEG.exe NOT FOUND\n\n"
                             "Screen recording is disabled.\n\n"
                             "Fix:\n"
                             "1. Go to: https://www.gyan.dev/ffmpeg/builds/\n"
@@ -2191,14 +2173,15 @@ class FriendsRepository:
             invalid_permissions = permissions - valid_job_names
             if invalid_permissions:
                 print(
-                    f"WARN! unknown job types for {email}: {sorted(invalid_permissions)}. "
-                    f"Allowed: {sorted(valid_job_names)}"
+                    f"WARN! {email} in {self.friends_filename} has access to {sorted(invalid_permissions)}, but this/these job type(s) are not found"
+                    f" (activated jobs: {sorted(valid_job_names)})"
                 )
             
     def _validate_friends_header(self, header_row) -> None:
         if not header_row or str(header_row[0]).strip().lower() != "email":
             raise ValueError(f"{self.friends_filename} column A must be 'email'")
 
+        '''
         valid_job_names = self.allowed_job_names
 
         for col in range(1, len(header_row)):
@@ -2209,9 +2192,9 @@ class FriendsRepository:
             jobname_str = str(jobname).strip().lower()
             if jobname_str not in valid_job_names:
                 print(
-                    f"WARN! unknown job type column in {self.friends_filename}: {jobname_str}. "
-                    f"Allowed: {sorted(valid_job_names)}"
+                    f"WARN! job type {jobname_str} in {self.friends_filename} is not found and access will not be considered (activated jobs: {sorted(valid_job_names)})"
                 )
+        '''
 
 
 class NetworkService:
@@ -2425,6 +2408,18 @@ class AuditRepository:
             row = cur.fetchone()
 
         return dict(row) if row is not None else None
+
+    def get_latest_row_by_source_ref(self, source_ref: str) -> dict | None:
+        with self._connect_with_retry() as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT * FROM audit_log WHERE source_ref = ? ORDER BY job_id DESC LIMIT 1",
+                (source_ref,),
+            )
+            row = cur.fetchone()
+
+        return dict(row) if row is not None else None
     
     def get_latest_job_id(self) -> int:
         with self._connect_with_retry() as conn:
@@ -2461,12 +2456,13 @@ class AuditRepository:
 
         return list_of_dicts
 
-    def mark_job_running(self, job_id):
+    def mark_running(self, job_id):
         lifecycle_status: LifecycleStatus = "RUNNING"
         self._update(
             job_id=job_id,
             lifecycle_status=lifecycle_status
             )
+        self.logger.system("marked RUNNING", job_id)
         
     def mark_verifying(self, job_id):
         lifecycle_status: LifecycleStatus = "VERIFYING"
@@ -2474,12 +2470,14 @@ class AuditRepository:
             job_id=job_id, 
             lifecycle_status=lifecycle_status,
             )
-        
+        self.logger.system("marked VERIFYING", job_id)
+
     def mark_done(self, job_id):
         self._update(
             job_id=job_id, 
             lifecycle_status="DONE", 
             )
+        self.logger.system("marked DONE", job_id)
     
     def mark_failed(self, job_id, error_code: LifecycleErrorCode, error_message):
         lifecycle_status: LifecycleStatus = "FAIL"
@@ -2489,6 +2487,7 @@ class AuditRepository:
             error_code=error_code, 
             error_message=error_message, 
             )
+        self.logger.system("marked FAIL", job_id)
         
     def mark_final_reply_sent(self, job_id):
         self._update(
@@ -2509,9 +2508,8 @@ class AuditRepository:
                     raise
                 time.sleep(0.5)
 
-        # to satisfy pylance
-        conn = sqlite3.connect(self.audit_db_path, timeout=10,)
-        return conn  
+
+        return sqlite3.connect("unreachable")  # to satisfy pylance
 
     def _build_audit_fields(self, job_id, email_address=None, email_subject=None, source_ref=None, job_name: JobName | None = None, started_at_date=None, started_at_time=None, lifecycle_status: LifecycleStatus | None = None, final_reply_sent=None, source_type: SourceType | None = None, error_code=None, error_message=None, rpatool_payload=None, request_summary=None) -> dict:
         all_fields = {
@@ -2662,28 +2660,53 @@ class MailRecoveryService:
 
         if active_job.source_type != "personal_inbox":
             return
+        
+        lifecycle_status: LifecycleStatus = "FAIL"
+        error_code: LifecycleErrorCode = fault.error_code
+        public_error_message: str | None = fault.error_message
+        fallback_status: Literal["DONE", "FAIL"]
 
+        
         if active_job.job_id is None:
             active_job.job_id = self.generate_job_id()
+        else:
+            existing = self.audit.get_row_by_id(active_job.job_id)
+
+            #if self.audit.final_reply_sent(active_job.job_id):
+            if existing and existing.get("final_reply_sent"):
+                self.logger.system("recovery skipped final reply; already sent", active_job.job_id)
+                try:
+                    fallback_status = "DONE" if existing.get("lifecycle_status") == "DONE" else "FAIL"
+                    self.personal_mailbox.delete(active_job, fallback_status=fallback_status)
+                except Exception as err: self.logger.system(err, active_job.job_id)
+                return
+            
 
         if not active_job.job_name:
             active_job.job_name = "unknown"
 
         # Job audit
         try:
-            existing = self.audit.get_row_by_id(active_job.job_id)
             if existing:
-                self.audit.mark_failed(
-                    job_id=active_job.job_id,
-                    error_code=fault.error_code,
-                    error_message=fault.error_message or str(fault.cause) or "runtime fault",
-                )
+
+                existing_status = existing.get("lifecycle_status")
+                if existing_status in {"DONE", "FAIL", "REJECTED"}:
+                    # keep original status
+                    lifecycle_status = existing_status
+                    error_code = existing.get("error_code")
+                    public_error_message = existing.get("error_message")
+                else:
+                    self.audit.mark_failed(
+                        job_id=active_job.job_id,
+                        error_code=fault.error_code,
+                        error_message=fault.error_message or str(fault.cause) or "runtime fault",
+                    )
             else:
                 self.audit.insert(
                     active_job=active_job,
                     started_at_date=datetime.datetime.now().strftime("%Y-%m-%d"),
                     started_at_time=datetime.datetime.now().strftime("%H:%M:%S"),
-                    lifecycle_status="FAIL",
+                    lifecycle_status=lifecycle_status,
                     error_code=fault.error_code,
                     error_message=fault.error_message or str(fault.cause) or "runtime fault",
                     final_reply_sent=False,
@@ -2696,14 +2719,15 @@ class MailRecoveryService:
             if not self.personal_mailbox.sent_reply_exists(active_job.source_ref):
                 self.notifications.send_final_reply(
                     active_job=active_job,
-                    lifecycle_status="FAIL",
-                    error_code=fault.error_code or "PRE_HANDOVER_CRASH",
-                    public_error_message=None,
+                    lifecycle_status=lifecycle_status,
+                    error_code=error_code,
+                    public_error_message=public_error_message,
                     recovery_context=recovery_context,
                 )
 
             self.audit.mark_final_reply_sent(active_job.job_id)
-            self.personal_mailbox.delete(active_job, fallback_status="FAIL")
+            fallback_status = "DONE" if lifecycle_status == "DONE" else "FAIL"
+            self.personal_mailbox.delete(active_job, fallback_status=fallback_status)
         except Exception as err:
             self.logger.system(err, active_job.job_id)
 
@@ -2823,6 +2847,14 @@ class MailRecoveryService:
 
             if not self.shared_mailbox._has_status_prefix(active_job_from_scan, "PROCESSING"):
                 continue
+            
+            row = self.audit.get_latest_row_by_source_ref(active_job_from_scan.source_ref)
+            if row and row.get("lifecycle_status") != "FAIL":
+                    self.audit.mark_failed(
+                        job_id=row.get("job_id"),
+                        error_code="PRE_HANDOVER_CRASH",
+                        error_message="stale shared PROCESSING mail found",
+                    )
 
             active_job_from_scan.job_id = job_id or self.generate_job_id()
 
@@ -2840,7 +2872,7 @@ class MailRecoveryService:
                 )
 
             return
-
+    
     def insert_recovery_audit_row(self, active_job:ActiveJob, final_reply_sent: bool, recovery_reason,):
         
         if recovery_reason == "SAFESTOP":
@@ -2866,35 +2898,6 @@ class MailRecoveryService:
             final_reply_sent = final_reply_sent,
         )
 
-    def _mark_faulted_pending_job_for_recovery(self, fault: RobotRuntimeFault):
-        # update audit row to FAIL for pending reply jobs
-        job_id = fault.handover_file.job_id if fault.handover_file else fault.active_job.job_id if fault.active_job else None
-        error_code = fault.error_code
-        error_message = fault.error_message
-
-        if job_id == None:
-            return
-
-        for audit_row in self.audit.get_personal_pending_reply_jobs():
-            # TODO: replace with non-loop logic
-
-            if job_id == audit_row.get("job_id"):
-                if not (audit_row.get("error_code") or audit_row.get("error_message")):
-                    # to avoid ovverride
-                    try: self.audit.mark_failed(job_id=job_id, error_code=error_code, error_message=error_message)
-                    except Exception as e: self.logger.system(e, job_id)
-
-    def _build_active_job_from_audit(self, audit_row) -> ActiveJob:
-        
-        return ActiveJob(
-            source_ref = audit_row.get("source_ref"),
-            source_type = audit_row.get("source_type"),
-            email_address = audit_row.get("email_address"),
-            email_subject = audit_row.get("email_subject"),
-            email_body = "[ORIGINAL MESSAGE LOST]",
-            source_data = {},
-            )
-  
     def _check_for_stop_command(self, active_job: ActiveJob) -> bool:
 
         if "stop1234" in str(active_job.email_subject).strip().lower():
@@ -2974,7 +2977,7 @@ class SafestopController:
                 except Exception as e: self.logger.system(e)
 
         crash_report = (
-                "ROBOT RUNTIME CRASHED\n\n"
+                "ROBOTRUNTIME CRASHED\n\n"
                 f"phase={fault.phase}\n"
                 f"error_code={fault.error_code}\n"
                 f"fault={fault.error_message}\n\n"
@@ -3133,7 +3136,7 @@ class SafestopController:
 # ============================================================
 
 class DashboardUI:
-    """Tkinter dashboard for runtime status, logs, and operator visibility."""
+    """Tkinter dashboard for visibility of runtime status and logs"""
 
     # colors
     BG = "#000000"
@@ -3539,6 +3542,7 @@ class DashboardUI:
 
         self.root.destroy()
 
+
 # ============================================================
 # MAIN ENTRYPOINT
 # ============================================================
@@ -3562,17 +3566,20 @@ class RobotRuntime:
         self.network_service = NetworkService(self.logger, config.network_healthcheck_path)
         self.recording = RecordingService(self.logger, config.recordings_in_progress_folder, config.recordings_destination_folder)
 
-        
-        if build_backends:
-            backends = build_backends(self.logger)
-            self.personal_mailbox = backends["personal_mailbox"]
-            self.shared_mailbox = backends["shared_mailbox"]
-            self.erp_backend = backends["erp_backend"]
-        else:
-            self.personal_mailbox = DemoMailBackend(self.logger, "personal_inbox", )
-            self.shared_mailbox = DemoMailBackend(self.logger, "shared_inbox")
-            self.erp_backend = DemoErpBackend()
+        backends = {
+            "personal_mailbox": DemoMailBackend("personal_inbox"),
+            "shared_mailbox": DemoMailBackend("shared_inbox"),
+            "erp_backend": DemoErpBackend(),
+        }
 
+        # use custom_backends.py to add custom backend(s) (and use same name to override demo, eg. 'erp_backend')
+        if build_custom_backends:
+            custom_backends = build_custom_backends()
+            backends.update(custom_backends)
+
+        self.personal_mailbox = backends["personal_mailbox"]
+        self.shared_mailbox = backends["shared_mailbox"]
+        self.erp_backend = backends["erp_backend"]
 
         self.personal_mail_handlers = {"ping": PingHandler(self.logger),}
         self.shared_mail_handlers = {}
@@ -3596,7 +3603,7 @@ class RobotRuntime:
         self._validate_job_handlers_registry()
         
         self.friends_repo = FriendsRepository(config.friends_path, config.organisation_domain, allowed_job_names=set(self.personal_mail_handlers.keys()))
-        self.notifications = UserNotificationService(self.personal_mailbox, self.friends_repo, config)
+        self.notifications = UserNotificationService(self.logger, self.personal_mailbox, self.friends_repo, config)
         self.job_lifecycle = JobLifecycleService(self.logger, self.handover, self.ui.post_show_recording_overlay, self.recording, self.audit, self.notifications, self.personal_mailbox, self.shared_mailbox, self.job_handlers, self.ui.post_hide_recording_overlay, self.generate_job_id)
         self.mail_flow = MailFlow(self.logger, self.friends_repo, self.audit, self._is_within_operating_schedule, self.network_service, self.personal_mail_handlers, self.shared_mail_handlers, self.job_lifecycle, self.personal_mailbox, self.shared_mailbox,)
         self.query_flow = QueryFlow(self.logger, self.query_handlers, self.audit, self.job_lifecycle, self._is_within_operating_schedule)
@@ -3654,20 +3661,20 @@ class RobotRuntime:
             self.safestop_controller.run_degraded_mode(fault)
       
     def generate_job_id(self) -> int:
-        '''unique id for all jobs. Works under single-machine assumption'''
+        '''Works under single-machine assumption'''
 
-        job_id = int(datetime.datetime.now().strftime("%Y%m%d%H%M%S"))
+        now = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+        job_id = int(now)
 
         try:
             last_job_id = self.audit.get_latest_job_id()
         except Exception as e:
-            time.sleep(5)
-            last_job_id = int(datetime.datetime.now().strftime("%Y%m%d%H%M%S"))
+            last_job_id = int(now) + 5
             self.logger.system(f"WARN: using fallback last_job_id due to audit error={e}")
 
         job_id = max(job_id, last_job_id + 1)
 
-        self.logger.system(f"assigned job_id", job_id)
+        self.logger.system(f"generated job_id", job_id)
         return job_id
 
     def _startup_sequence(self):
@@ -3682,6 +3689,7 @@ class RobotRuntime:
                 except Exception: pass
        
             # write 'idle' to avoid unnecessary errors in demo mode (the intended way is RPA tool creates handover.json)
+            # Cold-start policy
             self.handover.write(HandoverFile(state="idle"))
 
             handover_file = self.handover.read()
@@ -3698,11 +3706,7 @@ class RobotRuntime:
             self.recording.cleanup_aborted_recordings()
             self.friends_repo.reload_if_modified()
             self._refresh_jobs_done_counter()
-            
-            self.mail_recovery.recover_stuck_shared_mail()
-
-            # TODO: clean-up for mails stuck with prefix
-            
+                        
 
         except Exception as e:
             raise RobotRuntimeFault(
@@ -3740,7 +3744,7 @@ class RobotRuntime:
         self.logger.system(transition_message, handover_file.job_id)
 
         if state == "job_running":
-            self.audit.mark_job_running(handover_file.job_id)
+            self.audit.mark_running(handover_file.job_id)
         
         self.prev_state = state
 
