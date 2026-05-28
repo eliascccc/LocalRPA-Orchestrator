@@ -44,7 +44,7 @@ Python polls a data source → detects a valid case → prepares a payload → s
 
 ## Architecture
 
-<img width="1140" height="1709" alt="workflow" src="https://github.com/user-attachments/assets/0e0950c7-cc59-40ca-9fb0-3e989c862a62" />
+<img width="1139" height="1605" alt="577092826-0e0950c7-cc59-40ca-9fb0-3e989c862a62" src="https://github.com/user-attachments/assets/08e1afd8-ec5a-43e4-b4a2-635fc36f36be" />
 
 The diagram shows:
 
